@@ -1,6 +1,6 @@
 /* Audabook — service worker: keeps the app working with no internet once it has been opened.
    The build replaces CACHE_VERSION so a new release replaces the old files. */
-const CACHE = 'audabook-adf7b2595c';
+const CACHE = 'audabook-4506b82025';
 const FILES = [
   './',
   'index.html',

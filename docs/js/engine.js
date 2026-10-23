@@ -185,24 +185,30 @@
       return s.trim() || 'Microphone';
     },
 
-    // Higher is better. A plugged-in mic beats the Chromebook's own; Bluetooth headsets sound worst.
+    // Higher is better. A plugged-in mic beats the Chromebook's own; Bluetooth headsets sound worst,
+    // and virtual devices (loopback cables, phone-as-webcam apps) are usually silent, so they come last.
     score(label) {
       const l = String(label || '').toLowerCase();
       if (/maono/.test(l)) return 100;
+      if (/virtual|vb-audio|cable (in|out)|voicemeeter|droidcam|stereo mix|loopback|obs|nvidia broadcast|krisp|camo/.test(l)) return 1;
       if (/bluetooth|hands-?free|hfp|airpods|buds/.test(l)) return 3;
       if (/webcam|camera|c9\d\d|brio|hdmi|display/.test(l)) return 5;
       if (/internal|built-?in|integrated|front mic|rear mic|mic(rophone)? array|realtek|intel|chromebook/.test(l)) return 10;
       if (/mic jack|headset|headphone|earbud|earphone/.test(l)) return 15;
-      if (/usb|podcast|condenser|studio|interface|xlr|yeti|fifine|rode|shure|samson|tonor|hyperx|razer|focusrite|scarlett|behringer|audio-technica|at20\d\d|tascam|neewer|elgato|pnp/.test(l)) return 60;
+      if (/usb|podcast|condenser|studio|interface|xlr|yeti|fifine|rode|shure|samson|tonor|hyperx|razer|focusrite|scarlett|behringer|audio-technica|at20\d\d|tascam|neewer|elgato|pnp|audiobox|presonus|motu|audient|steinberg|apogee|m-audio|arturia/.test(l)) return 60;
       return 40; // something plugged in that we don't recognise: probably better than the built-in mic
     },
 
+    /** Audio inputs as { deviceId, label, groupId, isDefault }; isDefault marks the system's chosen mic. */
     async listInputs() {
       const md = root.navigator.mediaDevices;
       if (!md || !md.enumerateDevices) return [];
       try {
         const list = await md.enumerateDevices();
-        return list.filter((d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+        const def = list.find((d) => d.kind === 'audioinput' && d.deviceId === 'default');
+        return list
+          .filter((d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+          .map((d) => ({ deviceId: d.deviceId, label: d.label, groupId: d.groupId, isDefault: !!(def && def.groupId && def.groupId === d.groupId) }));
       } catch (e) {
         return [];
       }
@@ -214,7 +220,7 @@
       let bestScore = -1;
       for (const d of inputs) {
         if (!d.label) return null;
-        const s = SS.mic.score(d.label);
+        const s = SS.mic.score(d.label) + (d.isDefault ? 0.5 : 0); // ties go to the system's default mic
         if (s > bestScore) {
           best = d;
           bestScore = s;

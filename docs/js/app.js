@@ -77,8 +77,13 @@
     pendingWrites: new Set(),
     saveDirty: false,
     lastSaved: 0,
+    songId: SS.uid('song'), // which song in My Songs this is
+    songSaved: false, // false until the song has something in it and joins My Songs
+    songCreatedAt: Date.now(),
   };
   SS.app = app;
+  app.folder = new SS.SongsFolder(app.store);
+  app.folder.onChange = () => app.refreshFolderUI();
 
   app.saveSettings = function () {
     try {
@@ -1082,7 +1087,7 @@
 
   app.persistSource = function (src) {
     if (!app.store.available) return;
-    const p = app.store.putSource(src)
+    const p = app.store.putSource(src, app.songId)
       .catch((e) => app.saveFailed(e))
       .then(() => {
         app.pendingWrites.delete(p);
@@ -1103,16 +1108,200 @@
     clearTimeout(app.saveTimer);
     if (!app.store.available || !app.saveDirty) return;
     app.saveDirty = false;
+    // A brand-new song joins My Songs once it has something in it, so empty "New Song"s don't pile up.
+    if (!app.songSaved && !app.project.tracks.length) {
+      app.updateSaveStatus();
+      return;
+    }
+    const songId = app.songId;
     try {
       await Promise.all(Array.from(app.pendingWrites));
       app.pruneSources();
-      await app.store.saveProject(JSON.stringify(app.project));
-      app.lastSaved = Date.now();
+      const savedAt = Date.now();
+      await app.store.saveSong(Object.assign({
+        id: songId,
+        json: JSON.stringify(app.project),
+        savedAt,
+        createdAt: app.songCreatedAt,
+        fileName: app.songFileName,
+      }, SS.songSummary(app.project)));
+      if (app.songId === songId) {
+        app.songSaved = true;
+        app.lastSaved = savedAt;
+        app.scheduleFolderSave();
+      }
     } catch (e) {
       app.saveDirty = true;
       app.saveFailed(e);
     }
     app.updateSaveStatus();
+  };
+
+  /** Saves right away and waits for it (before switching songs). */
+  app.flushSave = async function () {
+    if (app.gesture != null) app.endGesture('Edit');
+    await app.autosaveNow();
+    await Promise.all(Array.from(app.pendingWrites));
+    if (app.folderTimer) app.folderSaveNow(); // queued in the background: switching songs needn't wait for Drive
+  };
+
+  // ---- the songs folder (real files, ideally in Google Drive) ---------------------------------
+
+  // Copies to the folder are batched a little, so a burst of edits is one write to Drive.
+  app.scheduleFolderSave = function () {
+    if (!app.folder.connected) return;
+    clearTimeout(app.folderTimer);
+    app.folderTimer = setTimeout(app.folderSaveNow, 2500);
+  };
+
+  app.folderSaveNow = function () {
+    clearTimeout(app.folderTimer);
+    app.folderTimer = 0;
+    if (!app.folder.connected || !app.songSaved) return Promise.resolve();
+    // Take a snapshot now: the folder write runs in the background, even after she switches songs.
+    const song = {
+      id: app.songId,
+      name: app.project.name,
+      json: JSON.stringify(app.project),
+      savedAt: app.lastSaved,
+      createdAt: app.songCreatedAt,
+      fileName: app.songFileName,
+    };
+    const sources = new Map(app.sources);
+    app.folderBusy = (app.folderBusy || 0) + 1;
+    app.updateSaveStatus();
+    return app.folder.run(async () => {
+      const fileName = await app.folder.saveOpenSong(song, sources);
+      if (fileName !== song.fileName) {
+        await app.store.setSongFileName(song.id, fileName);
+        if (app.songId === song.id) app.songFileName = fileName;
+      }
+      app.folderSavedAt = Date.now();
+    }).finally(() => {
+      app.folderBusy--;
+      app.updateSaveStatus();
+    });
+  };
+
+  /** Brings My Songs and the folder in step. visible: show progress (first connection, restoring). */
+  app.syncFolder = async function (visible) {
+    if (!app.folder.connected || app.folderSyncing) return { imported: [], exported: 0 };
+    app.folderSyncing = true;
+    const progress = visible ? UI.progress('Getting your songs folder ready…') : null;
+    let result = { imported: [], exported: 0 };
+    try {
+      await app.flushSave();
+      result = (await app.folder.run(() => app.folder.sync((text) => {
+        if (progress) progress.set(0.5, text);
+        else app.status(text);
+      }))) || result;
+    } catch (e) {
+      console.warn(e);
+    } finally {
+      if (progress) progress.close();
+      app.folderSyncing = false;
+    }
+    // Songs that just came in from the folder: if nothing real is open, open the newest one.
+    if (result.imported.length && !app.songSaved && !app.project.tracks.length) {
+      const songs = await app.store.listSongs();
+      if (songs.length) await app.openSong(songs[0].id);
+    }
+    app.refreshFolderUI();
+    return result;
+  };
+
+  /** "Keep my songs safe" / "Find my songs": pick the folder. Call straight from a click. */
+  app.chooseFolder = async function () {
+    if (!SS.SongsFolder.supported()) {
+      UI.toast('This browser can’t save to folders. Use Back up in My Songs to keep copies instead.', { kind: 'error' });
+      return false;
+    }
+    try {
+      await app.folder.choose();
+    } catch (e) {
+      if (e.name !== 'AbortError') app.handleError(e.name === 'SecurityError' || e.name === 'NotAllowedError'
+        ? new SS.UserError('Chrome won’t let Audabook use that folder. Try making a new folder (for example in Google Drive › My Drive) and choosing that.')
+        : e);
+      return false;
+    }
+    try { localStorage.setItem(FOLDER_ASK_KEY, String(Date.now())); } catch (e) { /* storage blocked */ }
+    const result = await app.syncFolder(true);
+    const found = result.imported.length;
+    UI.toast((found ? 'Found ' + SS.plural(found, 'song') + ' in “' + app.folder.label + '”. ' : '') +
+      'From now on every song is also kept in “' + app.folder.label + '”.', { kind: 'success', timeout: 8000 });
+    return true;
+  };
+
+  app.reconnectFolder = async function () {
+    try {
+      if (!(await app.folder.reconnect())) return;
+    } catch (e) {
+      app.handleError(e);
+      return;
+    }
+    await app.syncFolder(false);
+    app.status('Reconnected to “' + app.folder.label + '”. Your songs are being kept there again.');
+  };
+
+  const FOLDER_ASK_KEY = 'audabook.folderAsked';
+
+  /** Once a day at most: suggest choosing a songs folder if her songs only live inside Chrome. */
+  app.maybeSuggestFolder = async function () {
+    if (!SS.SongsFolder.supported() || app.folder.status !== 'none' || !app.store.available) return;
+    if (app.state.recording || app.state.armed || document.querySelector('dialog[open]')) return;
+    let last = 0;
+    try { last = +localStorage.getItem(FOLDER_ASK_KEY) || 0; } catch (e) { return; }
+    if (Date.now() - last < 86400000) return;
+    let songs = [];
+    try { songs = await app.store.listSongs(); } catch (e) { return; }
+    if (!songs.length) return;
+    try { localStorage.setItem(FOLDER_ASK_KEY, String(Date.now())); } catch (e) { /* storage blocked */ }
+    const choice = await UI.dialog({
+      title: 'Keep your songs safe',
+      content:
+        '<p>Right now your songs are only stored inside Chrome, so clearing browsing data or resetting the Chromebook could erase them.</p>' +
+        '<p>Pick a folder and Audabook will keep a copy of every song there by itself. <b>Google Drive is best</b>: your songs are then safe even on a new Chromebook.</p>' +
+        '<p class="dim">In the window that opens, click <b>Google Drive</b>, then <b>My Drive</b>, then <b>Open</b>. Audabook makes an “Audabook Songs” folder there. ' +
+        'If Chrome asks to let Audabook edit files, click <b>Allow</b>.</p>',
+      buttons: [
+        { label: 'Not now', value: null },
+        { label: 'Choose folder…', value: 'choose', kind: 'primary' },
+      ],
+    });
+    if (choice === 'choose') app.chooseFolder();
+  };
+
+  /** The banner and the My Songs dot that show when her songs aren't being kept in a folder. */
+  app.refreshFolderUI = function () {
+    const status = app.folder.status;
+    const btn = document.querySelector('.songs-btn');
+    if (btn) btn.classList.toggle('unprotected', SS.SongsFolder.supported() && status !== 'connected' && app.songSaved);
+    const find = document.querySelector('.find-songs');
+    if (find) find.hidden = !SS.SongsFolder.supported() || status === 'connected';
+    const banner = document.getElementById('folder-banner');
+    if (banner) {
+      const show = status === 'needs-permission' || status === 'unreachable';
+      banner.hidden = !show;
+      if (show) {
+        banner.querySelector('.fb-text').textContent = status === 'needs-permission'
+          ? 'Audabook needs your OK to keep saving copies of your songs to “' + app.folder.label + '”.'
+          : 'Audabook can’t find your songs folder “' + app.folder.label + '”. It may have been moved or deleted.';
+        banner.querySelector('button').textContent = status === 'needs-permission' ? 'Allow' : 'Choose folder…';
+      }
+    }
+    app.updateSaveStatus();
+  };
+
+  // Ctrl+S: songs save by themselves, but pressing it should still feel like saving.
+  app.quickSave = async function () {
+    if (!app.store.available) return app.saveProject();
+    if (app.project.tracks.length || app.songSaved) app.saveDirty = true;
+    await app.flushSave();
+    if (app.songSaved) {
+      UI.toast('Saved “' + app.project.name + '”. It’s in My Songs, and Audabook keeps saving as you work.', { kind: 'success' });
+    } else {
+      UI.toast('Nothing to save yet. Import a beat or record something first.');
+    }
   };
 
   app.saveFailed = function (e) {
@@ -1121,8 +1310,8 @@
     app.saveErrorShown = true;
     const full = e && e.name === 'QuotaExceededError';
     UI.toast(full
-      ? 'Your Chromebook is out of storage space, so autosave stopped. Free up some space, and use File → Save Project to keep a copy.'
-      : 'Autosave ran into a problem. Use File → Save Project to keep a copy of your song.', { kind: 'error', timeout: 15000 });
+      ? 'Your Chromebook is out of storage space, so saving stopped. Delete old songs in My Songs or free up space, and use File → Save Backup File to keep a copy.'
+      : 'Saving ran into a problem. Use File → Save Backup File to keep a copy of your song.', { kind: 'error', timeout: 15000 });
   };
 
   // Audio kept alive only so old steps can be undone. Past this, the oldest undo steps are forgotten,
@@ -1163,6 +1352,7 @@
     if (!drop.length) return;
     for (const id of drop) app.sources.delete(id);
     if (app.store.available) app.store.deleteSources(drop).catch((e) => console.warn(e));
+    app.folder.run(() => app.folder.deleteAudio(drop));
   };
 
   app.updateSaveStatus = function () {
@@ -1172,15 +1362,17 @@
     let title = '';
     let cls = '';
     if (!app.store.available) {
-      text = 'Not autosaving';
-      title = 'This browser is blocking storage. Use File → Save Project to keep your work.';
+      text = 'Not saving';
+      title = 'This browser is blocking storage. Use File → Save Backup File to keep your work.';
       cls = 'warn';
-    } else if (app.saveDirty || app.pendingWrites.size) {
+    } else if (app.saveDirty || app.pendingWrites.size || app.folderBusy) {
       text = 'Saving…';
-      title = 'Your song is being saved in this browser.';
+      title = app.folderBusy ? 'Copying your song to “' + app.folder.label + '”.' : 'Your song is being saved to My Songs.';
     } else if (app.lastSaved) {
       text = 'Saved';
-      title = 'Your song is saved in this browser and will be here next time.';
+      title = app.folder.connected
+        ? 'Saved in My Songs, with a copy in “' + app.folder.label + '”.'
+        : 'Saved in My Songs (inside Chrome). To keep songs safe even if browsing data is cleared, choose a songs folder in My Songs.';
       cls = 'ok';
     }
     s.textContent = text;
@@ -1188,75 +1380,23 @@
     s.className = 'save-status ' + cls;
   };
 
-  app.restoreAutosave = async function () {
-    let rec = null;
+  /** On startup: reopen the song that was open last time (or keep the fresh, empty one). */
+  app.restoreLastSong = async function () {
+    let songs = [];
+    let id = null;
     try {
-      rec = await app.store.loadProject();
+      songs = await app.store.listSongs();
+      id = await app.store.getCurrentSongId();
+      await app.store.deleteOrphanSources(new Set(songs.map((s) => s.id)));
     } catch (e) {
       console.warn(e);
     }
-    if (!rec || !rec.json) return;
-    let data;
-    try {
-      data = JSON.parse(rec.json);
-    } catch (e) {
-      return;
-    }
-    const project = M.sanitizeProject(data);
-    const ids = Array.from(M.referencedSources(project));
-    const progress = ids.length ? UI.progress('Opening your song…') : null;
-    const map = new Map();
-    for (let i = 0; i < ids.length; i++) {
-      progress.set(i / ids.length, 'Loading audio ' + (i + 1) + ' of ' + ids.length + '…');
-      try {
-        const s = await app.store.getSource(ids[i]);
-        if (!s || !s.channels || !s.channels.length) continue;
-        const buffer = new AudioBuffer({ numberOfChannels: s.channels.length, length: Math.max(1, s.length), sampleRate: s.sampleRate });
-        s.channels.forEach((d, c) => buffer.copyToChannel(d, c));
-        map.set(ids[i], makeSource(ids[i], s.name || 'Audio', buffer));
-      } catch (e) {
-        console.warn('Could not restore audio', ids[i], e);
-      }
-    }
-    if (progress) progress.close();
-    const dropped = M.dropMissingSources(project, (id) => map.has(id));
-    app.project = project;
-    app.sources = map;
-    app.history.clear();
-    app.lastSaved = rec.savedAt || Date.now();
-    app.timeline.syncRows();
-    app.timeline.zoomFit();
-    app.changed();
-    if (dropped) UI.toast('Some audio from last time couldn’t be loaded, so ' + SS.plural(dropped, 'clip') + ' had to be removed.', { kind: 'error' });
-    try {
-      const extra = (await app.store.sourceIds()).filter((id) => !map.has(id));
-      await app.store.deleteSources(extra);
-    } catch (e) {
-      console.warn(e);
-    }
-    if (project.tracks.length) app.status('Welcome back! “' + project.name + '” is just how you left it.');
+    if (!songs.some((s) => s.id === id)) id = songs.length ? songs[0].id : null;
+    if (id) await app.openSong(id, { welcome: true, songCount: songs.length });
   };
 
-  // ---- songs (projects) ---------------------------------------------------------------------
-
-  app.confirmCloseSong = async function (opening) {
-    if (!app.project.tracks.length) return true;
-    const choice = await UI.dialog({
-      title: opening ? 'Open a different song?' : 'Start a new song?',
-      content: el('p', {
-        text: '“' + app.project.name + '” will be closed. It’s only kept in this browser, so if you want to come back to it later, save it as a project file first.',
-      }),
-      buttons: [
-        { label: 'Cancel', value: null },
-        { label: 'Save first…', value: 'save' },
-        { label: opening ? 'Close it and open' : 'Start new song', value: 'go', kind: 'danger' },
-      ],
-    });
-    if (choice === 'save') return app.saveProject();
-    return choice === 'go';
-  };
-
-  app.loadProject = async function (project, sources) {
+  /** Makes `project` the open song. song: { id, saved (already in My Songs), createdAt, savedAt } */
+  app.switchSong = function (project, sources, song) {
     app.engine.stopPlayback();
     const st = app.state;
     st.playing = false;
@@ -1265,30 +1405,146 @@
     st.sel = { t0: 0, t1: 0, tracks: new Set() };
     app.project = project;
     app.sources = sources;
+    app.songId = song.id;
+    app.songSaved = !!song.saved;
+    app.songCreatedAt = song.createdAt || Date.now();
+    app.songFileName = song.fileName;
+    app.lastSaved = song.saved ? song.savedAt || Date.now() : 0;
     app.history.clear();
     app.clipboard = null;
     app.gesture = null;
     app.saveErrorShown = false;
-    if (app.store.available) {
-      try {
-        await app.store.clear();
-      } catch (e) {
-        console.warn(e);
-      }
-      for (const s of sources.values()) app.persistSource(s);
-    }
     app.timeline.syncRows();
     app.timeline.zoomFit();
     app.changed();
+    // Just opening a song isn't an edit: don't re-save it (that would bump it to the top of My Songs).
+    clearTimeout(app.saveTimer);
+    app.saveDirty = false;
     app.afterStop();
   };
 
-  app.newProject = async function () {
+  /** Opens a song from My Songs. */
+  app.openSong = async function (id, opts) {
+    opts = opts || {};
+    if (app.state.recording) return false;
+    if (id === app.songId && app.songSaved) return true;
+    if (app.state.playing) app.pause();
+    await app.flushSave();
+    let rec = null;
+    try {
+      rec = await app.store.getSong(id);
+    } catch (e) {
+      app.handleError(e);
+      return false;
+    }
+    if (!rec) {
+      UI.toast('That song couldn’t be found.', { kind: 'error' });
+      return false;
+    }
+    let data = null;
+    try {
+      data = JSON.parse(rec.json);
+    } catch (e) { /* sanitize turns a damaged song into an empty one */ }
+    const project = M.sanitizeProject(data);
+    const ids = Array.from(M.referencedSources(project));
+    const progress = ids.length ? UI.progress('Opening “' + project.name + '”…') : null;
+    const map = new Map();
+    let failed = false;
+    for (let i = 0; i < ids.length; i++) {
+      progress.set(i / ids.length, 'Loading audio ' + (i + 1) + ' of ' + ids.length + '…');
+      try {
+        const s = await app.store.getSource(ids[i]);
+        if (!s || !s.channels || !s.channels.length) continue; // really gone: that clip is dropped below
+        const buffer = new AudioBuffer({ numberOfChannels: s.channels.length, length: Math.max(1, s.length), sampleRate: s.sampleRate });
+        s.channels.forEach((d, c) => buffer.copyToChannel(d, c));
+        map.set(ids[i], makeSource(ids[i], s.name || 'Audio', buffer));
+      } catch (e) {
+        console.warn('Could not load audio', ids[i], e);
+        failed = true;
+      }
+    }
+    if (progress) progress.close();
+    if (failed) {
+      // A read error (not missing audio): don't open half a song and risk saving it that way.
+      UI.toast('“' + project.name + '” couldn’t be opened just now. Try again, or restart the Chromebook if it keeps happening.', { kind: 'error' });
+      return false;
+    }
+    const dropped = M.dropMissingSources(project, (sid) => map.has(sid));
+    app.switchSong(project, map, { id, saved: true, createdAt: rec.createdAt || rec.savedAt, savedAt: rec.savedAt, fileName: rec.fileName });
+    try {
+      await app.store.setCurrentSongId(id);
+      // Tidy away this song's audio that nothing uses any more (left over from old undo history).
+      const used = new Set(ids);
+      await app.store.deleteSources((await app.store.sourceIdsForSong(id)).filter((sid) => !used.has(sid)));
+    } catch (e) {
+      console.warn(e);
+    }
+    if (dropped) {
+      UI.toast('Some audio in “' + project.name + '” couldn’t be found, so ' + SS.plural(dropped, 'clip') + ' had to be removed.', { kind: 'error' });
+      app.saveDirty = true;
+      app.scheduleAutosave();
+    }
+    if (opts.welcome) {
+      if (project.tracks.length) {
+        app.status('Welcome back! “' + project.name + '” is just how you left it.' +
+          (opts.songCount > 1 ? ' Your other songs are in My Songs.' : ''));
+      }
+    } else {
+      app.status('Opened “' + project.name + '”.');
+    }
+    return true;
+  };
+
+  // ---- songs (projects) ---------------------------------------------------------------------
+
+  // Only used when the browser blocks storage, so there is no My Songs to keep the old song in.
+  app.confirmCloseSong = async function (opening) {
+    if (!app.project.tracks.length) return true;
+    const choice = await UI.dialog({
+      title: opening ? 'Open a different song?' : 'Start a new song?',
+      content: el('p', {
+        text: 'This browser is blocking storage, so “' + app.project.name + '” can’t be kept in My Songs. ' +
+          'If you want to come back to it later, save a backup file first.',
+      }),
+      buttons: [
+        { label: 'Cancel', value: null },
+        { label: 'Save backup first…', value: 'save' },
+        { label: opening ? 'Close it and open' : 'Start new song', value: 'go', kind: 'danger' },
+      ],
+    });
+    if (choice === 'save') return app.saveProject();
+    return choice === 'go';
+  };
+
+  /** "My Song", or "My Song 2" etc. if that name is taken. */
+  app.uniqueSongName = async function (base) {
+    const names = new Set([app.project.name]);
+    try {
+      if (app.store.available) for (const s of await app.store.listSongs()) names.add(s.name);
+    } catch (e) { /* any name will do */ }
+    if (!names.has(base)) return base;
+    for (let n = 2; ; n++) if (!names.has(base + ' ' + n)) return base + ' ' + n;
+  };
+
+  /** Starts a new, empty song. The current one stays in My Songs. */
+  app.newSong = async function (name) {
     if (app.state.recording) return;
     if (app.state.playing) app.pause();
-    if (!(await app.confirmCloseSong(false))) return;
-    await app.loadProject(M.newProject('My Song', app.sampleRate()), new Map());
-    app.status('New song started. Import a beat or press Record.');
+    if (!app.store.available) {
+      if (!(await app.confirmCloseSong(false))) return;
+    } else {
+      await app.flushSave();
+    }
+    const project = M.newProject(name || 'My Song', app.sampleRate());
+    app.switchSong(project, new Map(), { id: SS.uid('song'), saved: false });
+    app.status('Started “' + project.name + '”.' + (app.store.available ? ' Your other songs are safe in My Songs.' : '') +
+      ' Import a beat, or press R to record.');
+  };
+
+  app.newSongDialog = async function () {
+    if (app.state.recording) return;
+    const name = await UI.prompt('New song', 'What’s it called? (You can change this any time.)', await app.uniqueSongName('My Song'));
+    if (name) await app.newSong(name.slice(0, 80));
   };
 
   app.openProjectPicker = function () {
@@ -1297,57 +1553,291 @@
     input.click();
   };
 
+  /** Opens a backup (.audabook) file as a new song in My Songs; nothing already there is replaced. */
   app.openProjectFile = async function (file) {
     if (app.state.recording) return;
     if (app.state.playing) app.pause();
-    if (!(await app.confirmCloseSong(true))) return;
+    if (!app.store.available && !(await app.confirmCloseSong(true))) return;
     const progress = UI.progress('Opening “' + file.name + '”…');
     try {
       await UI.nextFrame();
       const data = await SS.readProjectFile(await file.arrayBuffer());
+      // Fresh ids for the audio, so opening the same backup twice gives two independent songs
+      // (deleting one must never take the other's audio with it).
+      const newIds = new Map();
       const map = new Map();
-      for (const s of data.sources) map.set(s.id, makeSource(s.id, s.name, s.buffer));
+      for (const s of data.sources) {
+        const id = SS.uid('s');
+        newIds.set(s.id, id);
+        map.set(id, makeSource(id, s.name, s.buffer));
+      }
+      for (const t of data.project.tracks) for (const c of t.clips) c.src = newIds.get(c.src) || c.src;
       const dropped = M.dropMissingSources(data.project, (id) => map.has(id));
       progress.close();
-      await app.loadProject(data.project, map);
+      await app.flushSave();
+      data.project.name = await app.uniqueSongName(data.project.name);
+      app.switchSong(data.project, map, { id: SS.uid('song'), saved: false });
+      for (const s of map.values()) app.persistSource(s);
+      app.saveDirty = true;
+      app.scheduleAutosave();
       if (dropped) UI.toast(SS.plural(dropped, 'clip') + ' in that file had no audio and were left out.', { kind: 'error' });
-      app.status('Opened “' + data.project.name + '”.');
+      app.status('Opened “' + data.project.name + '” from a backup file.' + (app.store.available ? ' It’s now in My Songs.' : ''));
     } catch (e) {
       progress.close();
       app.handleError(e);
     }
   };
 
-  app.saveProject = async function () {
-    if (!app.project.tracks.length) {
-      UI.toast('There’s nothing to save yet.');
-      return false;
-    }
-    if (app.state.playing) app.pause();
-    const name = SS.safeFileName(app.project.name) + SS.PROJECT_EXT;
-    const target = await SS.pickSaveFile(name, {
-      id: 'audabook-project', description: 'Audabook project', mime: 'application/x-audabook', ext: SS.PROJECT_EXT,
-    });
-    if (!target) return false;
-    const progress = UI.progress('Saving project…');
+  const BACKUP_TYPE = { id: 'audabook-project', description: 'Audabook song backup', mime: 'application/x-audabook', ext: SS.PROJECT_EXT };
+
+  async function writeBackup(target, project, sources, name) {
+    const progress = UI.progress('Saving a backup of “' + name + '”…');
     try {
-      const blob = await SS.buildProjectFile(app.project, app.sources, (f) => progress.set(f * 0.9, 'Packing up the audio…'));
+      const blob = await SS.buildProjectFile(project, sources, (f) => progress.set(f * 0.9, 'Packing up the audio…'));
       progress.set(0.95, 'Writing the file…');
       const where = await target.save(blob);
       progress.close();
-      app.status('Project saved to ' + where + '.');
-      UI.toast('Saved “' + app.project.name + '” to ' + where + '.', { kind: 'success' });
+      app.status('Backup saved to ' + where + '.');
+      UI.toast('Saved a backup of “' + name + '” to ' + where + '.', { kind: 'success' });
       return true;
     } catch (e) {
       progress.close();
       app.handleError(e);
       return false;
     }
+  }
+
+  /** Saves the open song as a backup file (for keeping a copy outside the app, or moving it). */
+  app.saveProject = async function () {
+    if (!app.project.tracks.length) {
+      UI.toast('There’s nothing to save yet.');
+      return false;
+    }
+    if (app.state.playing) app.pause();
+    const target = await SS.pickSaveFile(SS.safeFileName(app.project.name) + SS.PROJECT_EXT, BACKUP_TYPE);
+    if (!target) return false;
+    return writeBackup(target, app.project, app.sources, app.project.name);
+  };
+
+  /** Backs up any song in My Songs without opening it. */
+  app.backupSong = async function (id, name) {
+    if (id === app.songId) return app.saveProject();
+    // Ask where to save first: Chrome only shows the save window straight after a click.
+    const target = await SS.pickSaveFile(SS.safeFileName(name) + SS.PROJECT_EXT, BACKUP_TYPE);
+    if (!target) return false;
+    try {
+      const rec = await app.store.getSong(id);
+      const project = M.sanitizeProject(JSON.parse(rec.json));
+      const sources = new Map();
+      for (const sid of M.referencedSources(project)) {
+        const s = await app.store.getSource(sid);
+        if (!s) continue;
+        // Stored audio is already plain sample arrays; this is all the backup writer needs.
+        sources.set(sid, { name: s.name, buffer: { numberOfChannels: s.channels.length, sampleRate: s.sampleRate, getChannelData: (c) => s.channels[c] } });
+      }
+      M.dropMissingSources(project, (sid) => sources.has(sid));
+      return writeBackup(target, project, sources, project.name);
+    } catch (e) {
+      app.handleError(e);
+      return false;
+    }
   };
 
   app.renameProject = async function () {
-    const name = await UI.prompt('Rename song', 'Song name (used to name your exported files)', app.project.name);
+    const name = await UI.prompt('Rename song', 'Song name (also used to name your exported files)', app.project.name);
     if (name) app.edit('Rename song', (p) => { p.name = name.slice(0, 80); });
+  };
+
+  app.renameSongById = async function (id, name) {
+    name = String(name || '').trim().slice(0, 80);
+    if (!name) return;
+    if (id === app.songId) {
+      app.edit('Rename song', (p) => { p.name = name; });
+    } else {
+      await app.store.renameSong(id, name);
+      app.folder.run(() => app.folder.exportSong(id)); // renames its file in the songs folder too
+    }
+  };
+
+  /** Deletes a song from My Songs for good (after asking). */
+  app.deleteSong = async function (id, name) {
+    if (app.state.recording) return false;
+    const ok = await UI.confirm('Delete “' + name + '”?',
+      'This deletes the song and all its recordings from Audabook for good. If you might want it later, click Back up first.',
+      'Delete song', 'danger');
+    if (!ok) return false;
+    try {
+      // What to remove from the songs folder too: the song's file and every piece of its audio.
+      const rec = await app.store.getSong(id);
+      const audioIds = new Set(await app.store.sourceIdsForSong(id));
+      try {
+        if (rec) for (const sid of M.referencedSources(JSON.parse(rec.json))) audioIds.add(sid);
+      } catch (e) { /* damaged song: its stored audio list is enough */ }
+      app.folder.run(() => app.folder.deleteSong(rec && rec.fileName, Array.from(audioIds)));
+      if (id === app.songId) {
+        // Step off the song first so nothing saves it again, then open the next most recent one.
+        app.gesture = null;
+        app.saveDirty = false;
+        app.switchSong(M.newProject(await app.uniqueSongName('My Song'), app.sampleRate()), new Map(), { id: SS.uid('song'), saved: false });
+        await app.store.deleteSong(id);
+        const songs = await app.store.listSongs();
+        if (songs.length) await app.openSong(songs[0].id);
+      } else {
+        await app.store.deleteSong(id);
+      }
+      UI.toast('Deleted “' + name + '”.');
+      return true;
+    } catch (e) {
+      app.handleError(e);
+      return false;
+    }
+  };
+
+  // "today at 3:12 PM", "yesterday at 9:05 AM", "Mar 3"
+  function whenText(ms) {
+    const d = new Date(ms);
+    const now = new Date();
+    const dayOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((dayOf(now) - dayOf(d)) / 86400000);
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (days === 0) return 'today at ' + time;
+    if (days === 1) return 'yesterday at ' + time;
+    return d.toLocaleDateString([], d.getFullYear() === now.getFullYear() ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function sizeText(bytes) {
+    return bytes >= 1073741824 ? (bytes / 1073741824).toFixed(1) + ' GB' : Math.max(1, Math.round(bytes / 1048576)) + ' MB';
+  }
+
+  /** The My Songs window: every song she has made, newest first. */
+  app.mySongsDialog = async function () {
+    if (app.state.recording) return;
+    if (!app.store.available) {
+      UI.dialog({
+        title: 'My Songs',
+        content: el('p', { text: 'This browser is blocking storage, so songs can’t be kept here. Use File → Save Backup File to keep your work.' }),
+      });
+      return;
+    }
+    if (app.state.playing) app.pause();
+    await app.flushSave(); // so the open song shows up with its latest changes
+    let ctrl = null;
+    const list = el('div', { class: 'song-list' });
+    const usage = el('p', { class: 'dim song-usage' });
+    const button = (text, kind, title, onclick) => el('button', { class: 'btn small ' + (kind || ''), type: 'button', text, title, onclick });
+    const render = async () => {
+      let songs = [];
+      try {
+        songs = await app.store.listSongs();
+      } catch (e) {
+        app.handleError(e);
+      }
+      const rows = [];
+      if (!app.songSaved) {
+        rows.push(el('div', { class: 'song-row current' }, [
+          el('div', { class: 'song-info' }, [
+            el('div', { class: 'song-name', text: app.project.name }),
+            el('div', { class: 'song-meta', text: 'Open now. It joins this list as soon as you import or record something.' }),
+          ]),
+        ]));
+      }
+      for (const s of songs) {
+        const isOpen = s.id === app.songId;
+        const open = () => {
+          ctrl.close(null);
+          app.openSong(s.id);
+        };
+        const info = el('div', { class: 'song-info', title: isOpen ? '' : 'Open this song', onclick: isOpen ? null : open }, [
+          el('div', { class: 'song-name' }, [s.name, isOpen ? el('span', { class: 'song-badge', text: 'Open now' }) : null]),
+          el('div', { class: 'song-meta', text: 'Edited ' + whenText(s.savedAt) + ' · ' + SS.formatTime(s.duration || 0, 0) + ' long · ' + SS.plural(s.trackCount || 0, 'track') }),
+        ]);
+        rows.push(el('div', { class: 'song-row' + (isOpen ? ' current' : '') }, [
+          info,
+          el('div', { class: 'song-actions' }, [
+            isOpen ? null : button('Open', 'primary', 'Open this song', open),
+            button('Rename', '', 'Rename this song', async () => {
+              const name = await UI.prompt('Rename song', 'Song name', s.name);
+              if (name) {
+                await app.renameSongById(s.id, name);
+                if (isOpen) await app.flushSave();
+                render();
+              }
+            }),
+            button('Back up', '', 'Save a backup file of this song (to keep a copy outside the app, or move it to another computer)', () => app.backupSong(s.id, s.name)),
+            button('Delete', 'danger-text', 'Delete this song for good', async () => {
+              if (await app.deleteSong(s.id, s.name)) render();
+            }),
+          ]),
+        ]));
+      }
+      if (!songs.length) rows.push(el('p', { class: 'dim', text: 'Songs you make show up here, and stay here when you start a new one.' }));
+      list.replaceChildren.apply(list, rows);
+      if (root.navigator.storage && root.navigator.storage.estimate) {
+        root.navigator.storage.estimate().then((est) => {
+          if (!est || !est.usage) return;
+          usage.textContent = 'Your songs use about ' + sizeText(est.usage) + ' of space on this Chromebook.' +
+            (app.folder.connected ? '' : ' For songs you really care about, use Back up to keep a copy in Google Drive too.');
+        }).catch(() => {});
+      }
+    };
+    // Where the songs are kept besides Chrome, and the one button that fixes it if they aren't.
+    const folderBox = el('div', { class: 'folder-box' });
+    const renderFolder = () => {
+      const f = app.folder;
+      let cls = 'warn';
+      let text;
+      let action = null;
+      if (!SS.SongsFolder.supported()) {
+        text = 'Your songs are stored inside this browser. Use Back up to keep copies somewhere else.';
+      } else if (f.status === 'connected') {
+        cls = 'ok';
+        text = 'Every song is also kept as files in “' + f.label + '”, so they’re safe even if browsing data is cleared.';
+        action = button('Change folder…', '', 'Keep your songs in a different folder', async () => {
+          await app.chooseFolder();
+          renderFolder();
+          render();
+        });
+      } else if (f.status === 'needs-permission') {
+        text = 'Audabook needs your OK to keep saving copies of your songs to “' + f.label + '”.';
+        action = button('Allow', 'primary', 'Let Audabook keep saving to your songs folder', async () => {
+          await app.reconnectFolder();
+          renderFolder();
+        });
+      } else {
+        text = f.status === 'unreachable'
+          ? 'Audabook can’t find your songs folder “' + f.label + '”. Choose it again (or a new one).'
+          : 'Your songs are only stored inside Chrome, so clearing browsing data could erase them. ' +
+            'Choose a folder (Google Drive is best) and Audabook keeps a copy of every song there. Already have one? Pick it to bring your songs back.';
+        action = button('Keep my songs safe…', 'primary', 'Choose a folder to keep your songs in', async () => {
+          await app.chooseFolder();
+          renderFolder();
+          render();
+        });
+      }
+      folderBox.className = 'folder-box ' + cls;
+      folderBox.replaceChildren(el('div', { class: 'folder-text', text }), action || '');
+    };
+    renderFolder();
+    const top = el('div', { class: 'song-toolbar' }, [
+      button('+ New Song', 'primary', 'Start a new song (this one stays here)', () => {
+        ctrl.close(null);
+        app.newSongDialog();
+      }),
+      button('Open a backup file…', '', 'Open a .audabook backup file as a new song', () => {
+        ctrl.close(null);
+        app.openProjectPicker();
+      }),
+    ]);
+    await UI.dialog({
+      title: 'My Songs',
+      wide: true,
+      content: el('div', { class: 'songs-dialog' }, [top, list, folderBox, usage]),
+      buttons: [{ label: 'Close', value: null }],
+      onOpen(c) {
+        ctrl = c;
+        render();
+      },
+    });
   };
 
   // ---- import -------------------------------------------------------------------------------
@@ -1575,7 +2065,7 @@
           loud.length ? el('p', { class: 'warn', text: 'Heads up: ' + loud.join(', ') + (loud.length > 1 ? ' were' : ' was') + ' too loud for a WAV file, so the loudest moments got clipped (they may sound crunchy). Turn the Vol slider down a little on ' + (loud.length > 1 ? 'those tracks' : 'that track') + ' and export again.' }) : null,
         ]),
         buttons: [{ label: 'Done', value: true, kind: 'primary' }],
-      });
+      }).then(() => app.maybeSuggestFolder()); // a finished song is a good moment to make sure it's kept safe
     } catch (e) {
       progress.close();
       app.handleError(e);
@@ -1756,7 +2246,8 @@
         '<b>Split</b> (<span class="kbd">S</span>) cuts a clip in two at the cursor. Drag a clip’s colored top bar to move it, or drag its edge to trim it.</li>' +
         '<li><b>Export.</b> File → Export → <b>Export All Stems</b> (or the big <b>Export Stems</b> button) saves every track as its own WAV file, all exactly the same length.</li>' +
         '</ol>' +
-        '<p class="dim">Your song saves itself in this browser as you go. Made a mistake? <span class="kbd">Ctrl</span>+<span class="kbd">Z</span> undoes anything.</p>',
+        '<p class="dim">Your songs save themselves as you go. <b>My Songs</b> (top right) has every song you’ve made, and ' +
+        '<b>New Song</b> starts another without losing anything. Made a mistake? <span class="kbd">Ctrl</span>+<span class="kbd">Z</span> undoes anything.</p>',
       buttons: [{ label: 'Let’s go', value: true, kind: 'primary' }],
     });
   };
@@ -1783,7 +2274,8 @@
       ['Shift + scroll', 'Scroll sideways'],
       ['Ctrl + I', 'Import audio'],
       ['Ctrl + Shift + E', 'Export all stems'],
-      ['Ctrl + S / Ctrl + O', 'Save / open a project file'],
+      ['Ctrl + S', 'Save now (songs also save by themselves)'],
+      ['Ctrl + O', 'My Songs: open any song you’ve made'],
     ];
     return UI.dialog({
       title: 'Keyboard shortcuts',
@@ -1812,7 +2304,14 @@
   const hasAudio = () => app.project.tracks.some((t) => t.clips.length);
 
   const ACTIONS = {
-    newProject: { run: () => app.newProject(), when: idle },
+    newSong: { run: () => app.newSongDialog(), when: idle },
+    mySongs: { run: () => app.mySongsDialog(), when: idle },
+    findSongs: { run: () => app.chooseFolder(), when: idle },
+    reconnectFolder: {
+      run: () => (app.folder.status === 'needs-permission' ? app.reconnectFolder() : app.chooseFolder()),
+      when: idle,
+    },
+    quickSave: { run: () => app.quickSave(), when: idle },
     openProject: { run: () => app.openProjectPicker(), when: idle },
     saveProject: { run: () => app.saveProject(), when: () => idle() && app.project.tracks.length > 0 },
     renameProject: { run: () => app.renameProject(), when: idle },
@@ -1883,9 +2382,9 @@
     {
       label: 'File',
       items: [
-        { label: 'New Song', action: 'newProject' },
-        { label: 'Open Project…', action: 'openProject', shortcut: 'Ctrl+O' },
-        { label: 'Save Project…', action: 'saveProject', shortcut: 'Ctrl+S' },
+        { label: 'New Song…', action: 'newSong' },
+        { label: 'My Songs…', action: 'mySongs', shortcut: 'Ctrl+O' },
+        { label: 'Save Now', action: 'quickSave', shortcut: 'Ctrl+S' },
         { label: 'Rename Song…', action: 'renameProject' },
         { sep: true },
         { label: 'Import Audio…', action: 'importAudio', shortcut: 'Ctrl+I' },
@@ -1896,6 +2395,9 @@
             { label: 'Export Mix as WAV…', action: 'exportMix', shortcut: 'Ctrl+E' },
           ],
         },
+        { sep: true },
+        { label: 'Save Backup File…', action: 'saveProject' },
+        { label: 'Open Backup File…', action: 'openProject' },
       ],
     },
     {
@@ -2078,8 +2580,8 @@
         case 'c': return run('copy');
         case 'v': return run('paste');
         case 'a': return run('selectAll');
-        case 's': return run('saveProject');
-        case 'o': return run('openProject');
+        case 's': return run('quickSave');
+        case 'o': return run('mySongs');
         case 'i': return run('importAudio');
         case 'e': return run(e.shiftKey ? 'exportStems' : 'exportMix');
         case 'backspace':
@@ -2210,7 +2712,11 @@
     });
     root.addEventListener('unhandledrejection', (e) => app.handleError(e.reason));
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') app.autosaveNow();
+      if (document.visibilityState === 'hidden') {
+        app.autosaveNow().then(() => {
+          if (app.folderTimer) app.folderSaveNow();
+        });
+      }
     });
     root.addEventListener('beforeunload', (e) => {
       if (app.state.recording || app.pendingWrites.size || (app.saveDirty && app.store.available)) {
@@ -2223,10 +2729,17 @@
     app.saveDirty = false;
     app.status('Ready');
 
+    app.store.onBlocked = () => UI.toast('Audabook is updating. Close any other Audabook windows to finish.', { timeout: 12000 });
     if (await app.store.open()) {
-      await app.restoreAutosave();
+      await app.folder.load();
+      // My Songs is empty but the folder has songs (e.g. browsing data was cleared): bring them back first.
+      if (app.folder.connected && !(await app.store.listSongs().catch(() => [])).length) await app.syncFolder(true);
+      await app.restoreLastSong();
+      if (app.folder.connected) app.syncFolder(false); // in the background: catch up with anything missed
+      // Ask Chrome to never clear these songs to free up space.
       if (root.navigator.storage && root.navigator.storage.persist) root.navigator.storage.persist().catch(() => {});
     }
+    app.refreshFolderUI();
     app.updateSaveStatus();
     app.refreshUI();
 
@@ -2251,6 +2764,7 @@
       root.navigator.serviceWorker.register('sw.js').catch((e) => console.warn('Offline mode unavailable:', e));
     }
     if (!storageFlag(SEEN_KEY)) app.quickStart();
+    else app.maybeSuggestFolder();
   };
 
   app.init().catch((e) => app.handleError(e));

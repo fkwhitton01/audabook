@@ -17,6 +17,7 @@
     <div class="brand" aria-hidden="true"><span class="brand-mark"></span>Audabook</div>
     <nav id="menus" class="menus" aria-label="Menu"></nav>
     <div class="spacer"></div>
+    <button class="songs-btn" type="button" data-action="mySongs" data-icon="songs" data-size="18" title="My Songs: every song you've made (Ctrl+O)"><span>My Songs</span></button>
     <button id="project-name" class="project-name" type="button" title="Rename this song">My Song</button>
     <span id="save-status" class="save-status" aria-live="polite"></span>
   </header>
@@ -84,6 +85,10 @@
   </div>
 
   <div id="arm-banner" class="arm-banner" role="status" aria-live="polite" hidden></div>
+  <div id="folder-banner" class="folder-banner" role="status" hidden>
+    <span class="fb-text"></span>
+    <button class="btn small primary" type="button" data-action="reconnectFolder">Allow</button>
+  </div>
 
   <main id="timeline" class="timeline">
     <div class="ruler-row">
@@ -103,6 +108,7 @@
             <button class="btn big rec" type="button" data-action="record" data-icon="record">Record</button>
           </div>
           <p class="dim">Plug in your USB mic first; it&rsquo;s picked automatically. Headphones help keep the beat out of your vocal.</p>
+          <p class="dim find-songs">Had songs before? <button class="link-btn" type="button" data-action="findSongs">Find my songs folder</button></p>
         </div>
       </div>
     </div>
@@ -130,6 +136,7 @@
 <script src="js/model.js"></script>
 <script src="js/peaks.js"></script>
 <script src="js/storage.js"></script>
+<script src="js/songsfolder.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/exporter.js"></script>
 <script src="js/projectfile.js"></script>

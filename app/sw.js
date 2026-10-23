@@ -12,6 +12,7 @@ const FILES = [
   'js/model.js',
   'js/peaks.js',
   'js/storage.js',
+  'js/songsfolder.js',
   'js/engine.js',
   'js/exporter.js',
   'js/projectfile.js',

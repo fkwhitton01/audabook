@@ -55,6 +55,7 @@
     help: 'M12 2a10 10 0 1 0 0 20a10 10 0 0 0 0-20zm1 17h-2v-2h2zm2.07-7.75l-.9.92A3.4 3.4 0 0 0 13 15h-2v-.5a4 4 0 0 1 1.17-2.83l1.24-1.26A2 2 0 1 0 10 9H8a4 4 0 1 1 7.07 2.25z',
     logo: 'M4 10.5h2v3H4zM7.5 7h2v10h-2zM11 4h2v16h-2zM14.5 8h2v8h-2zM18 10h2v4h-2z',
     metronome: 'M9.5 3h5l4.2 17H5.3zM11 5.5L7.6 18h8.8L13 5.5zM11.3 15.4l4.6-9.3 1.2.6-4.6 9.3z',
+    songs: 'M4 6h12v2H4zm0 4h12v2H4zm0 4h8v2H4zm14-8v8.2A3 3 0 1 0 20 17V8h2V6z',
   };
 
   UI.icon = function (name, size) {

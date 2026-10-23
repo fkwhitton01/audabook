@@ -27,7 +27,7 @@
       <button class="tb-btn tb-play" type="button" data-action="togglePlay" data-icon="play" data-size="22" title="Play (Space)" aria-label="Play or pause"></button>
       <button class="tb-btn" type="button" data-action="stop" data-icon="stop" title="Stop and go back" aria-label="Stop"></button>
       <span class="rec-split">
-        <button class="tb-btn tb-record" type="button" data-action="record" data-icon="record" data-size="22" title="Record on a new track (R)" aria-label="Record"></button>
+        <button class="tb-btn tb-record" type="button" data-action="record" data-icon="record" data-size="22" title="Turn recording on (R), then press Space to start" aria-label="Recording on or off" aria-pressed="false"></button>
         <button class="tb-btn tb-caret" type="button" data-action="recordMenu" data-icon="caret" data-size="18" title="More recording options" aria-label="More recording options"></button>
       </span>
       <button class="tb-btn" type="button" data-action="goEnd" data-icon="end" title="Go to end (End)" aria-label="Go to end"></button>
@@ -82,6 +82,8 @@
       <button class="tb-btn" type="button" data-action="settings" data-icon="settings" title="Settings" aria-label="Settings"></button>
     </div>
   </div>
+
+  <div id="arm-banner" class="arm-banner" role="status" aria-live="polite" hidden></div>
 
   <main id="timeline" class="timeline">
     <div class="ruler-row">

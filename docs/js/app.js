@@ -69,6 +69,7 @@
       recording: null,
       starting: false,
       monitoring: false,
+      armed: false, // recording is on: false | 'new' | 'into'
     },
     settings: loadSettings(),
     engine: new SS.AudioEngine(),
@@ -339,9 +340,11 @@
     app.afterStop();
   };
 
+  // Space and the big play button: with recording on they start and stop takes instead of playing.
   app.togglePlay = function () {
     const st = app.state;
     if (st.recording) app.stopRecording();
+    else if (st.armed) app.startRecording();
     else if (st.playing) app.pause();
     else app.play();
   };
@@ -413,19 +416,27 @@
   };
 
   // ---- recording --------------------------------------------------------------------------
+  // Works like a tape deck's record button: R (or the red button) turns recording on, which opens the mic
+  // so the level meter is live. Space starts a take and Space again stops it; recording stays on for the
+  // next take until R turns it off, and then Space plays the song again.
 
-  /** into = true records onto the selected track (replacing what's under it); otherwise a new track. */
-  app.record = async function (into) {
+  /**
+   * Turns recording on or off. mode 'new' puts each take on a new track; 'into' records onto the
+   * selected track, replacing what's under it. Pressing the same key again turns recording off.
+   */
+  app.toggleArm = async function (mode) {
     const st = app.state;
-    if (st.recording) return app.stopRecording();
     if (st.starting) return;
-    let target = null;
-    if (into) {
-      target = app.selectedTracks()[0];
-      if (!target) {
-        UI.toast('First click a track’s name to choose where to record. Or press Record (R) to make a new track.');
-        return;
-      }
+    if (st.armed && (st.armed === mode || st.recording)) return app.disarm();
+    if (mode === 'into' && !app.selectedTracks()[0]) {
+      UI.toast('First click a track’s name to choose where to record. Or press R to record each take on a new track.');
+      return;
+    }
+    if (st.armed) {
+      st.armed = mode; // switching between new-track and into-track: the mic is already open
+      app.refreshUI();
+      app.armedStatus();
+      return;
     }
     if (st.playing) app.pause();
     st.starting = true;
@@ -447,7 +458,75 @@
       return;
     }
     st.starting = false;
+    st.armed = mode;
     app.onDevicesChanged(); // now that the mic is allowed, Chrome shows the mic names
+    app.refreshUI();
+    app.armedStatus();
+  };
+
+  app.armedStatus = function () {
+    const target = app.state.armed === 'into' && app.selectedTracks()[0];
+    const mic = app.engine.input && app.engine.input.label ? ' (' + app.engine.input.label + ')' : '';
+    app.status('Recording is on' + mic + '. Press Space to start ' +
+      (target ? 'recording into “' + target.name + '”' : 'a new take') +
+      ', and Space again to stop. Press R to turn recording off.');
+  };
+
+  app.disarm = async function () {
+    const st = app.state;
+    if (st.recording) await app.stopRecording();
+    st.armed = false;
+    if (!st.monitoring) app.engine.closeInput();
+    app.refreshUI();
+    app.status('Recording is off. Space plays the song.');
+  };
+
+  // The open mic was unplugged or switched off.
+  app.onInputLost = function () {
+    if (app.state.recording) {
+      UI.toast('The microphone was disconnected, so recording stopped. Your take so far was kept.', { kind: 'error' });
+      app.stopRecording().then(() => app.reopenInput());
+    } else {
+      app.reopenInput();
+    }
+  };
+
+  /** Re-opens the mic (after a plug/unplug or a settings change) if recording is on or the mic check is running. */
+  app.reopenInput = async function () {
+    const st = app.state;
+    if (st.recording || app.reopening || (!st.monitoring && !st.armed)) return;
+    app.reopening = true;
+    try {
+      app.engine.closeInput();
+      await app.engine.openInput(app.settings);
+      app.refreshMicName();
+    } catch (e) {
+      st.armed = false;
+      st.monitoring = false;
+      app.handleError(e);
+    } finally {
+      app.reopening = false;
+      app.refreshUI();
+    }
+  };
+
+  /** Starts a take (Space while recording is on). */
+  app.startRecording = function () {
+    const st = app.state;
+    if (!st.armed || st.recording || st.starting) return;
+    if (!app.engine.input) {
+      app.reopenInput();
+      return;
+    }
+    let target = null;
+    if (st.armed === 'into') {
+      target = app.selectedTracks()[0];
+      if (!target) {
+        UI.toast('Click a track’s name to choose where to record, then press Space.');
+        return;
+      }
+    }
+    if (st.playing) app.pause();
     const from = st.cursor;
     app.beginGesture();
     let track = target && M.findTrack(app.project, target.id);
@@ -462,6 +541,7 @@
     const playStart = app.engine.play(app.project, app.sources, from, null, { excludeTrack: track.id, countIn });
     const rec = {
       trackId: track.id, from, playStart, overdub, countIn,
+      into: !!target,
       rate: app.engine.sampleRate,
       peaks: new SS.PeakBuilder(),
       input: app.engine.input,
@@ -470,10 +550,6 @@
       startedAt: root.performance.now(),
     };
     app.engine.onCaptureData = (chs) => rec.peaks.append(chs);
-    app.engine.onInputLost = () => {
-      UI.toast('The microphone was disconnected, so recording stopped. Your take so far was kept.', { kind: 'error' });
-      app.stopRecording();
-    };
     app.engine.startCapture();
     st.recording = rec;
     st.playing = true;
@@ -490,7 +566,7 @@
     app.refreshUI();
     const mic = rec.input && rec.input.label ? ' with ' + rec.input.label : '';
     app.status((countIn ? 'Count-in… then recording' : 'Recording') + ' on “' + track.name + '”' + mic +
-      '. Press Space or Stop when you’re done.');
+      '. Press Space to stop.');
   };
 
   app.stopRecording = async function () {
@@ -506,8 +582,7 @@
     }
     app.engine.stopPlayback();
     app.engine.onCaptureData = null;
-    app.engine.onInputLost = null;
-    if (!st.monitoring) app.engine.closeInput();
+    if (!st.monitoring && !st.armed) app.engine.closeInput();
     st.recording = null;
     st.playing = false;
     st.playRange = null;
@@ -550,7 +625,8 @@
     app.setSelection(start, start + dur, [track.id]);
     app.status('Recorded ' + SS.formatTime(dur, 1) + ' on “' + track.name + '”.' +
       (level.boost ? ' It was quiet, so it was turned up ' + level.boost + ' dB.' : '') +
-      ' Press Space to hear it, or Backspace to delete it.');
+      (st.armed ? ' Space records another take. Press R to turn recording off and listen back.'
+        : ' Press Space to hear it, or Backspace to delete it.'));
   };
 
   /**
@@ -644,13 +720,6 @@
     }
   };
 
-  app.reopenMonitor = async function () {
-    if (!app.state.monitoring) return;
-    app.engine.closeInput();
-    app.state.monitoring = false;
-    await app.toggleMonitor();
-  };
-
   // Runs when a mic (or any audio device) is plugged in or unplugged.
   app.onDevicesChanged = async function () {
     const inputs = await SS.mic.listInputs();
@@ -668,10 +737,10 @@
         const name = SS.mic.cleanLabel(best.label);
         UI.toast('🎙️ ' + name + ' is connected. ' +
           (app.state.recording ? 'It will be used for your next recording.' : 'Audabook will record with it.'), { kind: 'success' });
-        if (app.state.monitoring && !app.state.recording) await app.reopenMonitor();
+        await app.reopenInput(); // switch to it right away if the mic is open (and not mid-take)
       } else if (lost && !app.state.recording) {
         UI.toast('The microphone was unplugged.' + (best ? ' Audabook will use ' + SS.mic.cleanLabel(best.label) + ' for now.' : ''), { kind: 'error' });
-        if (app.state.monitoring) await app.reopenMonitor();
+        await app.reopenInput();
       }
     }
     app.refreshMicName(inputs);
@@ -778,7 +847,7 @@
     if (st.recording || st.starting) return;
     if (st.monitoring) {
       st.monitoring = false;
-      app.engine.closeInput();
+      if (!st.armed) app.engine.closeInput(); // recording-on keeps the mic open
       app.refreshUI();
       app.status('Mic check off.');
       return;
@@ -1334,7 +1403,7 @@
       app.endGesture(added.length > 1 ? 'Import ' + added.length + ' files' : 'Import audio');
       if (wasEmpty) app.timeline.zoomFit();
       app.setSelection(app.state.cursor, app.state.cursor, added);
-      app.status('Imported ' + SS.plural(added.length, 'file') + '. Press Record to sing or play along.');
+      app.status('Imported ' + SS.plural(added.length, 'file') + '. Press R to turn recording on, then Space to sing or play along.');
       if (namedBpm) UI.toast('The file name says ' + namedBpm + ' BPM, so the song tempo is now ' + namedBpm + '. You can change it at the top.', { kind: 'success', timeout: 7000 });
     } else {
       app.gesture = null;
@@ -1600,12 +1669,8 @@
     });
     const restartMic = async () => {
       app.saveSettings();
-      if (app.state.monitoring) {
-        app.engine.closeInput();
-        app.state.monitoring = false;
-        await app.toggleMonitor();
-        setTestLabel();
-      }
+      await app.reopenInput();
+      setTestLabel();
     };
     mic.addEventListener('change', async () => {
       s.deviceId = mic.value;
@@ -1684,8 +1749,9 @@
         '<li><b>Bring in a beat or song.</b> Use <b>Import</b> (or File → Import Audio), or drag a file onto this window. ' +
         'Type its tempo in the <b>BPM</b> box at the top (or tap <b>Tap</b> along with the beat) to get bars and beats and a metronome.</li>' +
         '<li><b>Record.</b> Plug in your mic (your Maono is picked automatically) and put on headphones. Press ' +
-        '<span class="kbd rec">●</span> Record (or the <span class="kbd">R</span> key), and <span class="kbd">Space</span> to stop. ' +
-        'Every take goes on its own track.</li>' +
+        '<span class="kbd rec">●</span> Record (or the <span class="kbd">R</span> key) to turn recording on, then ' +
+        '<span class="kbd">Space</span> to start and <span class="kbd">Space</span> again to stop. Every take goes on its own track. ' +
+        'Press <span class="kbd">R</span> again to turn recording off, and Space plays your song.</li>' +
         '<li><b>Trim and cut.</b> Drag across a waveform to select part of it, then press <span class="kbd">Backspace</span> to delete it. ' +
         '<b>Split</b> (<span class="kbd">S</span>) cuts a clip in two at the cursor. Drag a clip’s colored top bar to move it, or drag its edge to trim it.</li>' +
         '<li><b>Export.</b> File → Export → <b>Export All Stems</b> (or the big <b>Export Stems</b> button) saves every track as its own WAV file, all exactly the same length.</li>' +
@@ -1698,8 +1764,9 @@
   app.shortcutsDialog = function () {
     const rows = [
       ['Space', 'Play / pause (stops recording too)'],
-      ['R', 'Record on a new track'],
-      ['Shift + R', 'Record into the selected track'],
+      ['R', 'Turn recording on or off (each take on a new track)'],
+      ['Space', 'With recording on: start a take, and stop it'],
+      ['Shift + R', 'Turn recording on into the selected track (replaces what’s there)'],
       ['Backspace', 'Delete the selected audio (leaves a gap)'],
       ['Ctrl + Backspace', 'Delete and close the gap'],
       ['S', 'Split clips at the cursor'],
@@ -1765,8 +1832,11 @@
     selectNone: { run: () => app.selectNone(), when: idle },
     togglePlay: { run: () => app.togglePlay(), when: () => !app.state.starting },
     stop: { run: () => app.stop(), when: () => app.state.playing },
-    record: { run: () => app.record(false), when: () => !app.state.starting },
-    recordInto: { run: () => app.record(true), when: () => idle() && app.selectedTracks().length > 0 },
+    record: { run: () => app.toggleArm('new'), when: () => !app.state.starting },
+    recordInto: {
+      run: () => app.toggleArm('into'),
+      when: () => !app.state.starting && (app.state.armed === 'into' || app.selectedTracks().length > 0),
+    },
     recordMenu: { run: (btn) => app.openRecordMenu(btn), when: idle },
     toggleMonitor: { run: () => app.toggleMonitor(), when: idle },
     goStart: { run: () => app.goStart(), when: idle },
@@ -1852,8 +1922,8 @@
     {
       label: 'Tracks',
       items: [
-        { label: 'Record on New Track', action: 'record', shortcut: 'R' },
-        { label: 'Record into Selected Track', action: 'recordInto', shortcut: 'Shift+R' },
+        { label: () => (app.state.armed === 'new' ? 'Turn Recording Off' : 'Turn Recording On (New Track Each Take)'), action: 'record', shortcut: 'R' },
+        { label: () => (app.state.armed === 'into' ? 'Turn Recording Off' : 'Turn Recording On (Into Selected Track)'), action: 'recordInto', shortcut: 'Shift+R' },
         { label: 'Check My Mic', action: 'toggleMonitor' },
         { sep: true },
         { label: 'New Empty Track', action: 'addTrack' },
@@ -1897,8 +1967,8 @@
       return;
     }
     app.popup.open([
-      { label: 'Record on a new track', action: 'record', shortcut: 'R' },
-      { label: 'Record into the selected track', action: 'recordInto', shortcut: 'Shift+R' },
+      { label: () => (app.state.armed === 'new' ? 'Turn recording off' : 'Turn recording on (new track each take)'), action: 'record', shortcut: 'R' },
+      { label: () => (app.state.armed === 'into' ? 'Turn recording off' : 'Turn recording on (into the selected track)'), action: 'recordInto', shortcut: 'Shift+R' },
       { sep: true },
       { label: 'Check my mic', action: 'toggleMonitor' },
       { label: () => (app.settings.metronome ? 'Metronome and count-in: on' : 'Metronome and count-in: off'), action: 'toggleMetronome', shortcut: 'K' },
@@ -1916,16 +1986,34 @@
     for (const b of document.querySelectorAll('#toolbar [data-action], #empty [data-action], .ruler-corner [data-action]')) {
       b.disabled = !app.canRun(b.dataset.action);
     }
+    body.classList.toggle('is-armed', !!st.armed);
+    // The big button does what Space does: with recording on it starts and stops takes.
     const play = document.querySelector('[data-action=togglePlay]');
-    const showPause = st.playing && !st.recording;
-    if (play.dataset.icon !== (showPause ? 'pause' : 'play')) {
-      play.dataset.icon = showPause ? 'pause' : 'play';
-      play.replaceChild(UI.icon(play.dataset.icon, 22), play.firstChild);
+    const look = st.recording ? ['stop', 'Stop recording (Space)']
+      : st.armed ? ['record', 'Start recording (Space)']
+        : st.playing ? ['pause', 'Pause (Space)'] : ['play', 'Play (Space)'];
+    if (play.dataset.icon !== look[0]) {
+      play.dataset.icon = look[0];
+      play.replaceChild(UI.icon(look[0], 22), play.firstChild);
     }
-    play.title = showPause ? 'Pause (Space)' : 'Play (Space)';
-    const rec = document.querySelector('[data-action=record]');
+    play.title = look[1];
+    play.setAttribute('aria-label', look[1]);
+    play.classList.toggle('rec-mode', !!st.armed);
+    const rec = document.querySelector('#toolbar [data-action=record]');
+    rec.classList.toggle('armed', !!st.armed && !st.recording);
     rec.classList.toggle('active', !!st.recording);
-    rec.title = st.recording ? 'Stop recording (Space)' : 'Record on a new track (R)';
+    rec.setAttribute('aria-pressed', String(!!st.armed));
+    rec.title = st.armed ? 'Recording is on. Click (or press R) to turn it off.' : 'Turn recording on (R), then press Space to start';
+    const banner = document.getElementById('arm-banner');
+    const target = st.armed === 'into' && app.selectedTracks()[0];
+    banner.hidden = !st.armed && !st.recording;
+    banner.classList.toggle('live', !!st.recording);
+    banner.textContent = st.recording
+      ? 'Recording… press Space to stop.'
+      : st.armed
+        ? 'Recording is on' + (target ? ' (into “' + target.name + '”)' : '') +
+          ': press Space to start a take, and Space again to stop. Press R to turn recording off.'
+        : '';
     const nameBtn = document.getElementById('project-name');
     if (nameBtn.textContent !== app.project.name) nameBtn.textContent = app.project.name;
     document.title = app.project.name + ' – Audabook';
@@ -1946,6 +2034,7 @@
       const left = Math.ceil((rec.playStart - app.engine.ctx.currentTime) / (60 / app.project.bpm));
       subText = 'Count-in… ' + left;
     } else if (rec) subText = 'Recording ' + SS.formatTime(app.liveEnd() - rec.from, 1);
+    else if (app.state.armed) subText = 'Ready: press Space';
     else if (s.t1 - s.t0 > 1e-6) subText = 'Selected ' + SS.formatTime(s.t1 - s.t0, 2);
     else subText = 'Song length ' + SS.formatTime(M.projectEnd(app.project), 0);
     if (sub.textContent !== subText) sub.textContent = subText;
@@ -2097,6 +2186,7 @@
   }
 
   app.init = async function () {
+    app.engine.onInputLost = app.onInputLost;
     app.applyTheme();
     app.timeline = new SS.Timeline(app);
     app.timeline.pps = app.timeline.laneWidth / 40;

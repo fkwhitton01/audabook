@@ -11,7 +11,11 @@ Built for her Chromebook (Intel N150, 4 GB RAM). It also works on any Chromebook
 ## What it does
 
 - **Import** MP3, WAV, M4A, OGG and FLAC (File → Import Audio, the Import button, or drag files onto the window). If a beat's filename includes its tempo, like `Night Drive 140 BPM.mp3`, the tempo is set automatically.
-- **Record** with the **R** key or the red button. Each take goes on its own track, and the beat plays while she records.
+- **Record** like a tape deck's record button:
+  - **R** (or the red button) turns recording on. A red banner appears and the level meter goes live, so she can check her level before singing.
+  - **Space** starts a take, and **Space** again stops it. Recording stays on, so the next Space records another take, each on its own track.
+  - **R** turns recording off, and Space goes back to play/pause.
+  - The beat plays while she records. With a mouse, the big ▶ button turns red and does what Space does.
   - **Plug and play mic:** a USB mic such as her Maono is picked automatically over the built-in mic, and its name shows next to the level meter. Plugging it in or out mid-session pops up a message.
   - **Music mode:** Chrome's voice-call filters (echo cancel, noise suppression, auto-volume) are off, because they ruin singing.
   - **Level help:** quiet takes are turned up automatically. A silent or distorted take gets a plain-English tip, such as "check the mute button" or "turn the gain knob down".
@@ -50,9 +54,11 @@ Downsides: there's no app icon or offline install, and Chrome treats a local fil
 
 1. Plug the Maono into the Chromebook's USB port (a USB-C adapter is fine), then open Audabook.
 2. Click **Import a beat or song** and pick the beat.
-3. Press **Record**. Audabook explains that Chrome is about to ask about the microphone; she clicks **Allow** once and never again.
+3. Press **R** (or the red ● button) to turn recording on. The first time, Audabook explains that Chrome is about to ask about the microphone; she clicks **Allow** once and never again.
 4. Put on headphones so the beat doesn't leak into her vocal. Wired is best; Bluetooth headphones add delay.
-5. Press **Space** to stop. To keep everything, use **File → Export → Export All Stems**.
+5. Press **Space** to start singing, and **Space** again to stop. Repeat for more takes.
+6. Press **R** to turn recording off. Now Space plays everything back.
+7. To keep everything, use **File → Export → Export All Stems**.
 
 The app shows a 4-step Quick Start the first time it opens (Help → Quick Start brings it back), and **Help → Microphone Help** walks through mic problems.
 

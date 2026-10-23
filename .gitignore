@@ -1,0 +1,7 @@
+# Build output you can regenerate with `npm run build` (docs/ is kept: GitHub Pages serves it)
+dist/
+# Sample audio made by `npm run test-audio`
+test-audio/
+# Local tool settings
+.claude/
+node_modules/

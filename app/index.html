@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audabook</title>
+<meta name="description" content="Record, trim and export stems on a Chromebook.">
+<meta name="theme-color" content="#16181d">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app" class="app">
+  <header class="menubar">
+    <div class="brand" aria-hidden="true"><span class="brand-mark"></span>Audabook</div>
+    <nav id="menus" class="menus" aria-label="Menu"></nav>
+    <div class="spacer"></div>
+    <button id="project-name" class="project-name" type="button" title="Rename this song">My Song</button>
+    <span id="save-status" class="save-status" aria-live="polite"></span>
+  </header>
+
+  <div id="toolbar" class="toolbar" role="toolbar" aria-label="Controls">
+    <div class="tb-group transport">
+      <button class="tb-btn" type="button" data-action="goStart" data-icon="start" title="Go to start (Home)" aria-label="Go to start"></button>
+      <button class="tb-btn tb-play" type="button" data-action="togglePlay" data-icon="play" data-size="22" title="Play (Space)" aria-label="Play or pause"></button>
+      <button class="tb-btn" type="button" data-action="stop" data-icon="stop" title="Stop and go back" aria-label="Stop"></button>
+      <span class="rec-split">
+        <button class="tb-btn tb-record" type="button" data-action="record" data-icon="record" data-size="22" title="Record on a new track (R)" aria-label="Record"></button>
+        <button class="tb-btn tb-caret" type="button" data-action="recordMenu" data-icon="caret" data-size="18" title="More recording options" aria-label="More recording options"></button>
+      </span>
+      <button class="tb-btn" type="button" data-action="goEnd" data-icon="end" title="Go to end (End)" aria-label="Go to end"></button>
+    </div>
+
+    <div class="time-display" aria-live="off">
+      <div id="time-main" class="time-main">0:00.000</div>
+      <div id="time-sub" class="time-sub">Song length 0:00</div>
+    </div>
+
+    <button id="meter-btn" class="mic-chip" type="button" title="Click to check your microphone level">
+      <span class="mic-name-row"><span id="mic-name" class="mic-name">Microphone</span></span>
+      <span id="meter" class="meter" aria-hidden="true"><span class="meter-cover"></span><span class="meter-hold" hidden></span></span>
+    </button>
+
+    <div class="tb-group tempo" aria-label="Tempo">
+      <label class="bpm-box" title="Song tempo in beats per minute">
+        <input id="bpm" class="bpm-input" type="number" min="30" max="300" step="1" value="120" inputmode="numeric" aria-label="Tempo (BPM)">
+        <span class="bpm-unit">BPM</span>
+      </label>
+      <button class="tb-btn tb-text" type="button" data-action="tapTempo" title="Tap along with the beat to find its tempo (T)">Tap</button>
+      <select id="time-sig" class="sig-select" title="Time signature (beats in each bar)" aria-label="Time signature">
+        <option value="4">4/4</option>
+        <option value="3">3/4</option>
+        <option value="2">2/4</option>
+        <option value="6">6/8</option>
+        <option value="5">5/4</option>
+        <option value="7">7/8</option>
+      </select>
+      <button class="tb-btn" type="button" data-action="toggleMetronome" data-icon="metronome" title="Metronome click and count-in (K). Never included in exports." aria-label="Metronome" aria-pressed="false"></button>
+    </div>
+
+    <div class="tb-group edit">
+      <button class="tb-btn labeled" type="button" data-action="split" data-icon="split" title="Split clips at the cursor (S)"><span>Split</span></button>
+      <button class="tb-btn labeled" type="button" data-action="delete" data-icon="trash" title="Delete the selected audio (Backspace)"><span>Delete</span></button>
+      <button class="tb-btn labeled" type="button" data-action="trim" data-icon="trim" title="Keep only the selected audio"><span>Trim</span></button>
+      <button class="tb-btn" type="button" data-action="undo" data-icon="undo" title="Undo (Ctrl+Z)" aria-label="Undo"></button>
+      <button class="tb-btn" type="button" data-action="redo" data-icon="redo" title="Redo (Ctrl+Y)" aria-label="Redo"></button>
+    </div>
+
+    <div class="tb-group zoom">
+      <button class="tb-btn" type="button" data-action="zoomOut" data-icon="zoomOut" title="Zoom out (-)" aria-label="Zoom out"></button>
+      <button class="tb-btn" type="button" data-action="zoomIn" data-icon="zoomIn" title="Zoom in (+)" aria-label="Zoom in"></button>
+      <button class="tb-btn" type="button" data-action="zoomFit" data-icon="fit" title="Fit the whole song (F)" aria-label="Fit the whole song"></button>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="tb-group files">
+      <button class="tb-btn labeled" type="button" data-action="importAudio" data-icon="import" title="Import audio files (Ctrl+I)"><span>Import</span></button>
+      <button class="tb-btn labeled tb-export" type="button" data-action="exportStems" data-icon="export" title="Same as File &rarr; Export &rarr; Export All Stems (Ctrl+Shift+E)"><span>Export Stems</span></button>
+      <button class="tb-btn" type="button" data-action="settings" data-icon="settings" title="Settings" aria-label="Settings"></button>
+    </div>
+  </div>
+
+  <main id="timeline" class="timeline">
+    <div class="ruler-row">
+      <div class="ruler-corner">
+        <button class="add-track" type="button" data-action="addTrack" data-icon="plus" data-size="16" title="Add an empty track"><span>Track</span></button>
+      </div>
+      <canvas id="ruler" class="ruler" title="Click to move the playhead"></canvas>
+    </div>
+    <div id="tracks-scroll" class="tracks-scroll">
+      <div id="tracks" class="tracks"></div>
+      <div id="empty" class="empty">
+        <div class="empty-card">
+          <h2>Let&rsquo;s make some music</h2>
+          <p>Drop a beat or song here, or start by recording.</p>
+          <div class="empty-actions">
+            <button class="btn primary big" type="button" data-action="importAudio" data-icon="import">Import a beat or song</button>
+            <button class="btn big rec" type="button" data-action="record" data-icon="record">Record</button>
+          </div>
+          <p class="dim">Plug in your USB mic first; it&rsquo;s picked automatically. Headphones help keep the beat out of your vocal.</p>
+        </div>
+      </div>
+    </div>
+    <div class="hscroll-row">
+      <div class="hscroll-corner"></div>
+      <div id="hscroll" class="hscroll"><div id="hthumb" class="hthumb"></div></div>
+    </div>
+    <div id="playhead" class="playhead" hidden></div>
+    <div id="drop-hint" class="drop-hint" hidden><div>Drop audio files to import them</div></div>
+  </main>
+
+  <footer class="statusbar">
+    <span id="status" class="status">Loading&hellip;</span>
+  </footer>
+</div>
+
+<input type="file" id="file-audio" accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.ogg,.oga,.opus,.flac,.webm,.aif,.aiff" multiple hidden>
+<input type="file" id="file-project" accept=".audabook" hidden>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<noscript><p class="noscript">Audabook needs JavaScript turned on.</p></noscript>
+
+<script src="js/util.js"></script>
+<script src="js/wav.js"></script>
+<script src="js/zip.js"></script>
+<script src="js/model.js"></script>
+<script src="js/peaks.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/exporter.js"></script>
+<script src="js/projectfile.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

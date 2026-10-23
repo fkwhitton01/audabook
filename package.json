@@ -1,0 +1,13 @@
+{
+  "name": "audabook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A simple multitrack recorder for Chromebooks: import, record, trim, and export equal-length stems. Runs in Chrome, no Linux needed.",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "build": "node tools/build.mjs",
+    "serve": "node tools/serve.mjs app 5173",
+    "icons": "node tools/make-icons.mjs",
+    "test-audio": "node tools/make-test-audio.mjs"
+  }
+}

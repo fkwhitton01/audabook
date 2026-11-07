@@ -22,6 +22,14 @@ Built for her Chromebook (Intel N150, 4 GB RAM). It also works on any Chromebook
 - **Tempo:** a BPM box, a **Tap** button (tap along to find the tempo), time signature, a metronome with a one-bar count-in, a bars-and-beats ruler, and clips that snap to the beat. The click is never included in exports.
 - **Edit:** drag across a waveform to select, **Backspace** to delete, **S** to split, drag a clip's colored top bar to move it, drag its edge to trim. Cut, copy, paste, and up to 100 levels of undo. Cut points get a tiny automatic fade so they never click.
 - **Organize tracks:** drag a track's **⠿** handle (left of its name), or any empty spot of its panel, up or down to put it somewhere else. A blue line shows where it will land, and the list scrolls if she drags past the top or bottom. Ctrl+Z undoes a move; Tracks → Move Track Up/Down does the same from the menu.
+- **Wider track panel:** the panel with each track's name and controls is wider, and its right edge can be dragged to make it wider or narrower (double-click the edge for the standard width). Audabook remembers the width.
+- **Effects:** each track has an **Effects** button (or press **E**). It opens a window with four effects, each with one big On/Off switch and a couple of plain sliders:
+  - **Auto-Tune:** puts the voice on the right notes. **Style** goes from *Natural* (a gentle touch-up that keeps vibrato) to *Robot* (the hard, instant snap). **Key** is *Any note (easiest)* by default; **Find it for me** listens to the beat and picks the key.
+  - **Vocal Polish:** removes rumble, evens out loud and quiet parts, and adds a little brightness.
+  - **Echo:** repeats in time with the song's BPM (every beat, half beat, and so on).
+  - **Reverb:** from a small room to a big hall.
+  - Effects never change the recording itself. They're heard on playback right away, are included in exports (Export All Stems has an **Include effects** tick box), and can be switched off any time. When a track has effects, its button turns purple and says which.
+- **Live Auto-Tune while recording:** with recording on, the red bar has a **🎧 Live Auto-Tune** button. Turned on, she hears her own voice through Auto-Tune as she sings (it adds about 3 ms on top of the Chromebook's own delay). Each take she records that way gets Auto-Tune switched on for its track, so it plays back the way she heard it, while the recording itself stays untouched. The first time, it asks her to put headphones on; if the speakers start feeding back into the mic (a squeal), it switches itself off.
 - **Export:** **File → Export → Export All Stems** (or the big **Export Stems** button).
   - Every ticked track becomes its own WAV file; tracks that are muted start unticked.
   - All stems start at 0:00 and have exactly the same number of samples, so they line up in any music app.
@@ -77,7 +85,7 @@ Downsides: there's no app icon or offline install, and Chrome treats a local fil
 8. For the next song, click **My Songs → + New Song** (or File → New Song). The first song stays in My Songs.
 9. When Audabook offers to **keep her songs safe**, click **Choose folder…**, then pick **Google Drive → My Drive → Open**, and click **Allow** if Chrome asks. It makes an "Audabook Songs" folder there and copies every song into it from then on. She only does this once.
 
-The app shows a 4-step Quick Start the first time it opens (Help → Quick Start brings it back), and **Help → Microphone Help** walks through mic problems.
+The app shows a 5-step Quick Start the first time it opens (Help → Quick Start brings it back), and **Help → Microphone Help** walks through mic problems.
 
 ## Troubleshooting
 
@@ -101,13 +109,15 @@ Plain HTML, CSS and JavaScript with no frameworks and no dependencies; Node.js i
 |---|---|
 | `app/` | The app itself: `index.html`, `css/`, `js/`, icons, offline worker |
 | `app/js/model.js` | The editing model. Clips point into recorded or imported audio, so cuts never copy any audio. |
-| `app/js/engine.js` | Playback, recording (AudioWorklet), metronome, and USB-mic auto-selection |
+| `app/js/engine.js` | Playback, recording (AudioWorklet), metronome, live Auto-Tune, and USB-mic auto-selection |
+| `app/js/autotune.js` | The Auto-Tune engine: a JavaScript port of x42-Autotune / zita-at1 (see Credits), run in an AudioWorklet |
+| `app/js/effects.js` | The effect chains (Auto-Tune, Vocal Polish, Echo, Reverb) shared by playback and export, and the key finder |
 | `app/js/exporter.js` | Renders stems with `OfflineAudioContext`, so the export matches exactly what she hears |
 | `app/js/timeline.js` | Waveforms, ruler, and the mouse and touch editing |
 | `app/js/app.js` | Menus, shortcuts, dialogs, import/export, My Songs |
 | `app/js/storage.js` | The song library in IndexedDB (each song plus its audio); moves songs saved by the first version into My Songs |
 | `app/js/songsfolder.js` | The songs folder: writes songs as real files (File System Access API) and syncs them with My Songs, newest copy winning |
-| `test/` | Unit tests for editing, WAV and ZIP |
+| `test/` | Unit tests for editing, WAV and ZIP, plus measured tests of Auto-Tune (pitch error in cents, delay, CPU), the key finder, the compressor, and loading songs saved before effects existed |
 | `tools/` | Build, local server, icon and test-audio generators |
 | `docs/` | The built web app that GitHub Pages publishes (made by `npm run build`; don't edit by hand) |
 | `dist/` | Local build output: `Audabook.html` (single file) and `web/` (not committed) |
@@ -129,5 +139,14 @@ npm run serve
 `npm run serve` serves `app/` at http://localhost:5173. `npm run test-audio` writes sample beats into `test-audio/`.
 
 Memory: on a 4 GB Chromebook the app keeps at most about 400 MB of audio around for undo. Past that, the oldest undo steps are dropped instead of risking a crashed tab. A typical song (a stereo beat plus several vocal takes) uses well under that.
+
+## Credits and license
+
+Audabook is free software under the **GNU General Public License, version 3 or later** (see `LICENSE`).
+
+The Auto-Tune engine in `app/js/autotune.js` is a JavaScript port of the pitch correction in
+[x42-Autotune (fat1.lv2)](https://github.com/x42/fat1.lv2) by Robin Gareus, which is built on
+Fons Adriaensen's zita-at1 "Retuner" (GPL-2.0-or-later) and zita-resampler (GPL-3.0-or-later). Because it includes
+GPL code, Audabook as a whole is GPL-3.0-or-later.
 
 Some icons are adapted from Google's Material Icons (Apache License 2.0).

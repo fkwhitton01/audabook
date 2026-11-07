@@ -4,25 +4,54 @@
   const SS = root.SS;
 
   /**
-   * Renders tracks into one stereo AudioBuffer of exactly opts.frames samples, starting at 0:00.
-   * opts: { sampleRate, frames, applyMix } — applyMix uses each track's volume and pan.
+   * Renders tracks into one stereo buffer of exactly opts.frames samples, starting at 0:00.
+   * opts: { sampleRate, frames, applyMix, applyFx, songKey, bpm } — applyMix uses each track's volume and pan;
+   * applyFx (default on) plays each track through its effects, exactly as playback does.
    */
-  SS.renderTracks = function (tracks, sources, opts) {
-    const ctx = new OfflineAudioContext(2, opts.frames, opts.sampleRate);
+  SS.renderTracks = async function (tracks, sources, opts) {
+    const rate = opts.sampleRate;
+    const useFx = opts.applyFx !== false;
+    // Auto-Tune hears a moment ahead. Everything is rendered `lead` samples late, tracks with Auto-Tune start
+    // that much earlier, and the lead is cut off again, so every stem still starts exactly at 0:00.
+    const delayOf = (t) => (useFx ? Math.round(SS.fxLatency(t.fx, rate, false) * rate) : 0);
+    const lead = tracks.reduce((m, t) => Math.max(m, delayOf(t)), 0);
+    const ctx = new OfflineAudioContext(2, opts.frames + lead, rate);
+    if (useFx && SS.needsWorklet(tracks)) await SS.loadFx(ctx);
+    const fxOpts = (part) => ({ songKey: opts.songKey || 'any', bpm: opts.bpm || 120, part });
     for (const track of tracks) {
       const gain = ctx.createGain();
       gain.gain.value = opts.applyMix ? SS.dbToGain(track.gain) : 1;
+      let out = gain;
       if (opts.applyMix) {
         const pan = ctx.createStereoPanner();
         pan.pan.value = track.pan;
         gain.connect(pan);
-        pan.connect(ctx.destination);
-      } else {
-        gain.connect(ctx.destination);
+        out = pan;
       }
-      SS.scheduleTrack(ctx, gain, track, sources, 0, null, 0);
+      let dest = gain;
+      if (useFx && SS.fxShape(track.fx)) {
+        // Same layout as playback: most effects before Vol/Pan, reverb after.
+        const pre = SS.buildFxChain(ctx, track.fx, fxOpts('pre'));
+        const post = SS.buildFxChain(ctx, track.fx, fxOpts('post'));
+        pre.output.connect(gain);
+        dest = pre.input;
+        out.connect(post.input);
+        out = post.output;
+      }
+      out.connect(ctx.destination);
+      SS.scheduleTrack(ctx, dest, track, sources, 0, null, (lead - delayOf(track)) / rate);
     }
-    return ctx.startRendering();
+    const buf = await ctx.startRendering();
+    if (!lead) return buf;
+    // The same buffer seen from `lead` on (no copy: songs can be long and Chromebooks short on memory).
+    const views = SS.channelsOf(buf).map((d) => d.subarray(lead, lead + opts.frames));
+    return {
+      numberOfChannels: views.length,
+      length: opts.frames,
+      sampleRate: rate,
+      duration: opts.frames / rate,
+      getChannelData: (c) => views[c],
+    };
   };
 
   SS.channelsOf = function (buffer) {

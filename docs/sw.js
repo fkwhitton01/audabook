@@ -1,7 +1,7 @@
 /* Audabook — service worker: keeps the app working with no internet once it has been opened.
    Each release is cached as one complete set (the build stamps CACHE_VERSION), so the app always runs a
    single, whole version; a new release downloads in full in the background and takes over in one step. */
-const CACHE = 'audabook-15b7482b56';
+const CACHE = 'audabook-799dfdc0ce';
 const FILES = [
   './',
   'index.html',
@@ -14,6 +14,8 @@ const FILES = [
   'js/peaks.js',
   'js/storage.js',
   'js/songsfolder.js',
+  'js/autotune.js',
+  'js/effects.js',
   'js/engine.js',
   'js/exporter.js',
   'js/projectfile.js',

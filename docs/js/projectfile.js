@@ -26,6 +26,7 @@
         bpm: project.bpm,
         beatsPerBar: project.beatsPerBar,
         showBeats: project.showBeats,
+        key: project.key,
         tracks: project.tracks,
       },
       sources: list.map((s) => ({ id: s.id, name: s.name, file: s.file })),

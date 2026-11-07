@@ -14,7 +14,67 @@
   M.MIN_BPM = 30;
   M.MAX_BPM = 300;
 
+  // ---- effects (the sound itself is made in effects.js; these are the settings saved with a song) ----
+  const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  M.NOTE_NAMES = NOTE_NAMES;
+  SS.SONG_KEYS = ['any'].concat(...NOTE_NAMES.map((n) => [n + ' major', n + ' minor']));
+  SS.keyLabel = (key) => (key === 'any' || !key ? 'Any note (easiest)' : key);
+
+  SS.FX = {
+    autotune: {
+      label: 'Auto-Tune',
+      icon: '🎤',
+      blurb: 'Puts your voice on the right notes, from a gentle touch-up to the robot sound.',
+      defaults: { style: 0.5 },
+    },
+    polish: {
+      label: 'Vocal Polish',
+      icon: '✨',
+      blurb: 'Clearer, more even vocals: removes rumble, evens out loud and quiet bits, adds sparkle.',
+      defaults: { amount: 0.5 },
+    },
+    echo: {
+      label: 'Echo',
+      icon: '🔁',
+      blurb: 'Repeats your voice in time with the beat.',
+      defaults: { amount: 0.3, repeats: 0.35, timing: '1/4' },
+    },
+    reverb: {
+      label: 'Reverb',
+      icon: '🏛️',
+      blurb: 'Makes it sound like you’re singing in a room or a big hall.',
+      defaults: { amount: 0.3, size: 0.5 },
+    },
+  };
+  SS.FX_ORDER = ['autotune', 'polish', 'echo', 'reverb']; // the order they're heard in
+  SS.ECHO_TIMINGS = { '1/8': 0.5, '1/4': 1, 'dotted 1/8': 0.75, '1/2': 2 }; // in beats
+
+  SS.newFx = (type, values) => Object.assign({ id: SS.uid('fx'), type, on: true }, SS.FX[type].defaults, values || {});
+
+  /** Cleans effect settings from a saved song: known effects only, once each, values in range. */
+  SS.sanitizeFx = function (list) {
+    const out = [];
+    for (const f of Array.isArray(list) ? list : []) {
+      if (!f || typeof f !== 'object' || !SS.FX[f.type] || out.some((x) => x.type === f.type)) continue;
+      const d = SS.FX[f.type].defaults;
+      const fx = { id: typeof f.id === 'string' && f.id ? f.id.slice(0, 40) : SS.uid('fx'), type: f.type, on: f.on !== false };
+      for (const k in d) {
+        if (k === 'timing') fx.timing = Object.prototype.hasOwnProperty.call(SS.ECHO_TIMINGS, f.timing) ? f.timing : d.timing;
+        else fx[k] = SS.clamp(SS.finite(f[k], d[k]), 0, 1);
+      }
+      out.push(fx);
+    }
+    // Always kept in listening order, so the list reads the way the sound flows.
+    out.sort((a, b) => SS.FX_ORDER.indexOf(a.type) - SS.FX_ORDER.indexOf(b.type));
+    return out;
+  };
+
+  SS.hasActiveFx = (track) => !!(track.fx && track.fx.some((f) => f.on));
+  /** Which effects are switched on, in order, e.g. "autotune,reverb". */
+  SS.fxShape = (list) => SS.FX_ORDER.filter((t) => (list || []).some((f) => f.type === t && f.on)).join(',');
+
   // showBeats turns on the bars-and-beats ruler, grid, and snapping once the tempo has been set.
+  // key is the song's musical key, used by Auto-Tune ('any' lets it use every note).
   M.newProject = function (name, sampleRate) {
     return {
       version: 1,
@@ -23,6 +83,7 @@
       bpm: 120,
       beatsPerBar: 4,
       showBeats: false,
+      key: 'any',
       tracks: [],
     };
   };
@@ -63,6 +124,7 @@
       pan: 0,
       mute: false,
       solo: false,
+      fx: [],
       clips: [],
     };
   };
@@ -286,6 +348,7 @@
     out.bpm = SS.clamp(SS.finite(p.bpm, 120), M.MIN_BPM, M.MAX_BPM);
     out.beatsPerBar = SS.clamp(Math.round(SS.finite(p.beatsPerBar, 4)), 1, 12);
     out.showBeats = !!p.showBeats;
+    out.key = SS.SONG_KEYS.indexOf(p.key) >= 0 ? p.key : 'any';
     for (const t of Array.isArray(p.tracks) ? p.tracks : []) {
       if (!t || typeof t !== 'object') continue;
       const track = {
@@ -296,6 +359,7 @@
         pan: SS.clamp(SS.finite(t.pan, 0), -1, 1),
         mute: !!t.mute,
         solo: !!t.solo,
+        fx: SS.sanitizeFx(t.fx), // songs saved before effects existed simply have none
         clips: [],
       };
       for (const c of Array.isArray(t.clips) ? t.clips : []) {
@@ -337,6 +401,7 @@
     bpm: project.bpm,
     beatsPerBar: project.beatsPerBar,
     showBeats: project.showBeats,
+    key: project.key,
     tracks: project.tracks,
   });
 

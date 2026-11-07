@@ -95,7 +95,7 @@
         this.port.postMessage({ type: 'data', frame: this.chunkFrame, channels: out }, out.map((a) => a.buffer));
         this.fill = 0;
       }
-      process(inputs) {
+      process(inputs, outputs) {
         if (!this.alive) return false;
         const input = inputs[0];
         if (!input || !input.length) return true;
@@ -113,31 +113,32 @@
           this.peak = 0;
           this.levelFrames = 0;
         }
+        // Some USB mics send sound on only one side, so a dead channel is replaced by the live one.
+        const a = input[0];
+        const b = input.length > 1 ? input[1] : a;
+        let left = a;
+        let right = b;
+        if (b !== a) {
+          let ea = 0;
+          let eb = 0;
+          for (let i = 0; i < n; i++) {
+            ea += a[i] * a[i];
+            eb += b[i] * b[i];
+          }
+          if (eb <= ea * 1e-7) right = a;
+          else if (ea <= eb * 1e-7) left = b;
+        }
+        let mono = left;
+        if (left !== right) {
+          if (!this.mix || this.mix.length !== n) this.mix = new Float32Array(n);
+          for (let i = 0; i < n; i++) this.mix[i] = (left[i] + right[i]) * 0.5;
+          mono = this.mix;
+        }
+        // The output carries the mic in mono, for hearing yourself live through Auto-Tune.
+        const out = outputs[0] && outputs[0][0];
+        if (out) out.set(mono.subarray(0, out.length));
         if (this.capturing) {
-          // Some USB mics send sound on only one side, so a dead channel is replaced by the live one.
-          const a = input[0];
-          const b = input.length > 1 ? input[1] : a;
-          let left = a;
-          let right = b;
-          if (b !== a) {
-            let ea = 0;
-            let eb = 0;
-            for (let i = 0; i < n; i++) {
-              ea += a[i] * a[i];
-              eb += b[i] * b[i];
-            }
-            if (eb <= ea * 1e-7) right = a;
-            else if (ea <= eb * 1e-7) left = b;
-          }
-          let srcs = [left, right];
-          if (this.channels === 1) {
-            if (left === right) srcs = [left];
-            else {
-              if (!this.mix || this.mix.length !== n) this.mix = new Float32Array(n);
-              for (let i = 0; i < n; i++) this.mix[i] = (left[i] + right[i]) * 0.5;
-              srcs = [this.mix];
-            }
-          }
+          const srcs = this.channels === 1 ? [mono] : [left, right];
           let i = 0;
           while (i < n) {
             if (this.fill === 0) this.chunkFrame = currentFrame + i;
@@ -240,6 +241,10 @@
       this.onCaptureData = null; // (Float32Array[]) while capturing
       this.onInputLost = null; // mic unplugged or switched off
       this.workletPromise = null;
+      this.fxReady = false; // the Auto-Tune worklet has loaded
+      this.onFxReady = null;
+      this.live = null; // hearing the mic through Auto-Tune
+      this.onFeedback = null; // the live sound was switched off because it was squealing
       this.metro = { on: false, bpm: 120, beatsPerBar: 4, volume: 0.55 };
       this.clickBuffers = null;
     }
@@ -315,6 +320,12 @@
         this.ctx = new AC({ latencyHint: 'interactive' });
         this.master = this.ctx.createGain();
         this.master.connect(this.ctx.destination);
+        // Auto-Tune runs on the audio thread; until its code has loaded, tracks play without it.
+        this.fxReady = false;
+        SS.loadFx(this.ctx).then(() => {
+          this.fxReady = true;
+          if (this.onFxReady) this.onFxReady();
+        }, (e) => console.warn('Auto-Tune could not load in this browser:', e));
       }
       if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
       return this.ctx;
@@ -351,17 +362,40 @@
         const gain = ctx.createGain();
         const pan = ctx.createStereoPanner();
         gain.connect(pan);
-        pan.connect(out);
-        const tn = { gain, pan };
+        const tn = { gain, pan, pre: null, post: null, shape: this.fxShapeFor(track) };
         group.tracks.set(track.id, tn);
         this.applyTrack(tn, project, track, true);
-        const nodes = SS.scheduleTrack(ctx, gain, track, sources, from, to, startAt);
+        // Effects: most go before Vol/Pan, reverb after (see effects.js).
+        let dest = gain;
+        if (tn.shape) {
+          tn.pre = SS.buildFxChain(ctx, track.fx, this.fxOptions(project, { part: 'pre' }));
+          tn.post = SS.buildFxChain(ctx, track.fx, this.fxOptions(project, { part: 'post' }));
+          tn.pre.output.connect(gain);
+          dest = tn.pre.input;
+          pan.connect(tn.post.input);
+          tn.post.output.connect(out);
+        } else {
+          pan.connect(out);
+        }
+        // Auto-Tune hears a moment ahead, so its track starts that much early and stays in time with the rest.
+        const early = tn.pre ? tn.pre.latency : 0;
+        const nodes = SS.scheduleTrack(ctx, dest, track, sources, from, to, startAt - early);
         for (const n of nodes) group.nodes.push(n);
       }
       this.group = group;
       group.clickTimer = setInterval(() => this.tickClicks(group), 40);
       this.tickClicks(group);
       return startAt;
+    }
+
+    fxOptions(project, extra) {
+      return Object.assign({ songKey: project.key || 'any', bpm: project.bpm, skip: this.fxReady ? null : SS.WORKLET_FX }, extra);
+    }
+
+    /** The effects a track will actually play with right now ('' for none). */
+    fxShapeFor(track) {
+      const list = (track.fx || []).filter((f) => this.fxReady || SS.WORKLET_FX.indexOf(f.type) < 0);
+      return SS.fxShape(list);
     }
 
     applyTrack(tn, project, track, immediate) {
@@ -376,13 +410,21 @@
       }
     }
 
-    /** Volume, pan, mute and solo changes take effect during playback without restarting it. */
+    /**
+     * Volume, pan, mute, solo and effect-setting changes take effect during playback without restarting it.
+     * Returns false when an effect was switched on or off: then playback has to be restarted to rebuild it.
+     */
     updateMix(project) {
-      if (!this.group) return;
+      if (!this.group) return true;
       for (const track of project.tracks) {
         const tn = this.group.tracks.get(track.id);
-        if (tn) this.applyTrack(tn, project, track, false);
+        if (!tn) continue;
+        if (tn.shape !== this.fxShapeFor(track)) return false;
+        this.applyTrack(tn, project, track, false);
+        if (tn.pre) tn.pre.update(track.fx, this.fxOptions(project));
+        if (tn.post) tn.post.update(track.fx, this.fxOptions(project));
       }
+      return true;
     }
 
     /** The song position being heard right now, or null when stopped. */
@@ -413,8 +455,58 @@
           try { n.stop(); } catch (e) { /* already stopped */ }
           try { n.disconnect(); } catch (e) { /* already gone */ }
         }
+        for (const tn of g.tracks.values()) {
+          if (tn.pre) tn.pre.dispose();
+          if (tn.post) tn.post.dispose();
+        }
         try { g.out.disconnect(); } catch (e) { /* already gone */ }
       }, 60);
+    }
+
+    // ---- hearing yourself through Auto-Tune while recording is on ----------------------------
+
+    /**
+     * Sends the open mic through Auto-Tune (in its low-delay live mode) to the speakers/headphones.
+     * opts: { style, key } to start or change it, or null to stop. Returns true if it is running.
+     */
+    setLiveTune(opts) {
+      const input = this.input;
+      const live = this.live;
+      if (live && opts && live.input === input) {
+        live.chain.update([SS.newFx('autotune', { style: opts.style })], { songKey: opts.key });
+        return true;
+      }
+      this.stopLiveTune();
+      if (!opts || !input || !this.fxReady) return false;
+      const ctx = this.ctx;
+      const chain = SS.buildFxChain(ctx, [SS.newFx('autotune', { style: opts.style })], { songKey: opts.key, live: true });
+      const vol = ctx.createGain();
+      vol.gain.setValueAtTime(0, ctx.currentTime);
+      vol.gain.linearRampToValueAtTime(1, ctx.currentTime + 0.05);
+      input.node.connect(chain.input);
+      chain.output.connect(vol);
+      vol.connect(this.master);
+      this.live = { input, chain, vol, loud: 0 };
+      return true;
+    }
+
+    stopLiveTune() {
+      const live = this.live;
+      if (!live) return;
+      this.live = null;
+      try {
+        live.vol.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
+      } catch (e) { /* context closed */ }
+      setTimeout(() => {
+        try { live.input.node.disconnect(live.chain.input); } catch (e) { /* already gone */ }
+        try { live.vol.disconnect(); } catch (e) { /* already gone */ }
+        live.chain.dispose();
+      }, 80);
+    }
+
+    /** Samples of delay the live Auto-Tune adds (not counting Chrome's own input and output delay). */
+    liveTuneLatency() {
+      return this.ctx ? SS.autotuneLatency(this.ctx.sampleRate, true) : 0;
     }
 
     outputLatency() {
@@ -521,6 +613,16 @@
     onWorkletMessage(input, msg) {
       if (msg.type === 'level') {
         if (this.onLevel && this.input === input) this.onLevel(msg.peak);
+        // Hearing yourself through speakers instead of headphones can feed back into a loud squeal:
+        // the mic then sits at full scale. Half a second of that switches the live sound off.
+        const live = this.live;
+        if (live && live.input === input) {
+          live.loud = msg.peak >= 0.98 ? live.loud + 1 : 0;
+          if (live.loud * 1024 >= 0.5 * this.ctx.sampleRate) {
+            this.stopLiveTune();
+            if (this.onFeedback) this.onFeedback();
+          }
+        }
         return;
       }
       const cap = input.capture;
@@ -567,6 +669,7 @@
     closeInput() {
       const input = this.input;
       if (!input) return;
+      this.stopLiveTune();
       this.input = null;
       try { input.node.port.postMessage({ cmd: 'close' }); } catch (e) { /* gone */ }
       try {

@@ -51,7 +51,7 @@
       this.scroll = 0;
       this.laneWidth = 600;
       this.trackH = 112;
-      this.headerW = 216;
+      this.headerW = 272;
       this.rulerH = 28;
       this.dpr = 1;
       this.dirty = new Set();
@@ -65,6 +65,7 @@
       this.bindRuler();
       this.bindScrollbar();
       this.bindWheel();
+      this.bindHeaderResize();
       if (root.ResizeObserver) new ResizeObserver(() => this.measure()).observe(this.scroller);
       else root.addEventListener('resize', () => this.measure());
       this.measure();
@@ -113,7 +114,7 @@
 
     measure() {
       const cs = getComputedStyle(document.documentElement);
-      this.headerW = parseFloat(cs.getPropertyValue('--header-w')) || 216;
+      this.headerW = parseFloat(cs.getPropertyValue('--header-w')) || 272;
       this.trackH = parseFloat(cs.getPropertyValue('--track-h')) || 112;
       this.rulerH = this.ruler.parentNode.clientHeight || 28;
       this.dpr = Math.min(2, root.devicePixelRatio || 1);
@@ -178,6 +179,37 @@
       if (t > this.scroll + vis * 0.97 || t < this.scroll) this.setScroll(t - vis * 0.05);
     }
 
+    // The right edge of the track panel can be dragged to make the panel (and its sliders) wider.
+    bindHeaderResize() {
+      const handle = el('div', { class: 'head-resizer', title: 'Drag to make the track panel wider or narrower (double-click: standard width)' });
+      this.root.appendChild(handle);
+      let drag = null;
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        e.preventDefault();
+        try { handle.setPointerCapture(e.pointerId); } catch (err) { /* pointer gone */ }
+        drag = { id: e.pointerId, x: e.clientX, w: this.headerW };
+        handle.classList.add('active');
+        document.body.classList.add('is-resizing');
+      });
+      handle.addEventListener('pointermove', (e) => {
+        if (!drag || e.pointerId !== drag.id) return;
+        drag.moved = true;
+        this.app.applyHeaderWidth(drag.w + e.clientX - drag.x, false);
+      });
+      const end = (e) => {
+        if (!drag || e.pointerId !== drag.id) return;
+        const moved = drag.moved;
+        drag = null;
+        handle.classList.remove('active');
+        document.body.classList.remove('is-resizing');
+        if (moved) this.app.applyHeaderWidth(this.headerW, true);
+      };
+      handle.addEventListener('pointerup', end);
+      handle.addEventListener('pointercancel', end);
+      handle.addEventListener('dblclick', () => this.app.applyHeaderWidth(0, true));
+    }
+
     // ---- rows ------------------------------------------------------------------------------
 
     createRow(track) {
@@ -187,6 +219,8 @@
       const del = el('button', { class: 'icon-btn th-del', type: 'button', title: 'Delete this track' }, [UI.icon('close', 16)]);
       const mute = el('button', { class: 'pill th-mute', type: 'button', title: 'Mute: silence this track (it is left out of stem exports)' }, 'Mute');
       const solo = el('button', { class: 'pill th-solo', type: 'button', title: 'Solo: hear only this track' }, 'Solo');
+      const fxText = el('span', { class: 'fx-text', text: 'Effects' });
+      const fx = el('button', { class: 'pill th-fx', type: 'button' }, [UI.icon('fx', 15), fxText]);
       const gain = el('input', { class: 'th-gain', type: 'range', min: String(SS.MIN_DB), max: String(SS.MAX_DB), step: '0.5', 'aria-label': 'Volume', title: 'Volume (double-click to reset)' });
       const gainOut = el('output', { class: 'th-val' });
       const pan = el('input', { class: 'th-pan', type: 'range', min: '-1', max: '1', step: '0.02', 'aria-label': 'Pan', title: 'Pan left/right (double-click to center)' });
@@ -194,7 +228,7 @@
       const grip = el('span', { class: 'th-grip', title: 'Drag to move this track up or down' }, [UI.icon('grip', 16)]);
       const head = el('div', { class: 'track-head' }, [
         el('div', { class: 'th-top' }, [grip, name, del]),
-        el('div', { class: 'th-buttons' }, [mute, solo]),
+        el('div', { class: 'th-buttons' }, [mute, solo, fx]),
         el('label', { class: 'th-slider' }, [el('span', { class: 'th-lbl', text: 'Vol' }), gain, gainOut]),
         el('label', { class: 'th-slider' }, [el('span', { class: 'th-lbl', text: 'Pan' }), pan, panOut]),
       ]);
@@ -202,7 +236,7 @@
       const sel = el('div', { class: 'lane-sel', hidden: true });
       const lane = el('div', { class: 'track-lane' }, [canvas, sel]);
       const row = el('div', { class: 'track', 'data-id': id }, [head, lane]);
-      const r = { id, row, head, name, mute, solo, gain, gainOut, pan, panOut, lane, canvas, ctx: canvas.getContext('2d'), sel };
+      const r = { id, row, head, name, mute, solo, fx, fxText, gain, gainOut, pan, panOut, lane, canvas, ctx: canvas.getContext('2d'), sel };
 
       head.addEventListener('pointerdown', (e) => {
         if (e.target.closest('button, input[type=range]')) return;
@@ -226,6 +260,10 @@
       del.addEventListener('click', () => app.deleteTrack(id));
       mute.addEventListener('click', () => app.toggleTrackFlag(id, 'mute'));
       solo.addEventListener('click', () => app.toggleTrackFlag(id, 'solo'));
+      fx.addEventListener('click', () => {
+        fx.blur();
+        if (!app.state.recording) app.effectsDialog(id);
+      });
       gain.addEventListener('input', () => app.setTrackLive(id, 'gain', +gain.value));
       gain.addEventListener('change', () => app.endGesture('Change volume', { mix: true }));
       gain.addEventListener('dblclick', () => {
@@ -364,6 +402,13 @@
       r.mute.setAttribute('aria-pressed', String(t.mute));
       r.solo.classList.toggle('on', t.solo);
       r.solo.setAttribute('aria-pressed', String(t.solo));
+      const on = (t.fx || []).filter((f) => f.on).map((f) => SS.FX[f.type].label);
+      const fxLabel = on.length === 0 ? 'Effects' : on.length === 1 ? on[0] : 'Effects (' + on.length + ')';
+      if (r.fxText.textContent !== fxLabel) r.fxText.textContent = fxLabel;
+      r.fx.classList.toggle('on', on.length > 0);
+      r.fx.title = on.length
+        ? 'Effects on: ' + on.join(', ') + '. Click to change them or turn them off.'
+        : 'Effects: Auto-Tune, Vocal Polish, Echo, Reverb. Click to add some.';
       if (+r.gain.value !== t.gain) r.gain.value = t.gain;
       if (+r.pan.value !== t.pan) r.pan.value = t.pan;
       r.gainOut.textContent = SS.formatDb(t.gain);

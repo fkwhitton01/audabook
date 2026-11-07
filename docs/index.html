@@ -84,7 +84,10 @@
     </div>
   </div>
 
-  <div id="arm-banner" class="arm-banner" role="status" aria-live="polite" hidden></div>
+  <div id="arm-banner" class="arm-banner" hidden>
+    <span class="ab-text" role="status" aria-live="polite"></span>
+    <button class="ab-live" type="button" data-action="toggleLiveTune" aria-pressed="false"></button>
+  </div>
   <div id="update-banner" class="update-banner" role="status" hidden>
     <span>A new version of Audabook is ready.</span>
     <button class="btn small" type="button" data-action="restartForUpdate">Restart to update</button>
@@ -142,6 +145,8 @@
 <script src="js/peaks.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/songsfolder.js"></script>
+<script src="js/autotune.js"></script>
+<script src="js/effects.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/exporter.js"></script>
 <script src="js/projectfile.js"></script>

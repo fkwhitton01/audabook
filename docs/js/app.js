@@ -21,7 +21,11 @@
     exportRate: 0,
     exportApplyMix: true,
     exportIncludeMix: false,
+    exportApplyFx: true,
     exportTo: 'folder',
+    liveTune: false, // hear yourself through Auto-Tune while recording is on
+    tuneStyle: 0.5, // the Auto-Tune style she last chose (used for live Auto-Tune on new takes)
+    headerW: 0, // width of the track panel she dragged it to (0 = the standard width)
   };
 
   function loadSettings() {
@@ -138,6 +142,7 @@
     app.project.bpm = s.bpm;
     app.project.beatsPerBar = s.beatsPerBar;
     app.project.showBeats = s.showBeats;
+    app.project.key = s.key || 'any';
     app.project.tracks = s.tracks;
     const ids = new Set(s.tracks.map((t) => t.id));
     app.state.sel.tracks = new Set(Array.from(app.state.sel.tracks).filter((id) => ids.has(id)));
@@ -186,8 +191,8 @@
     opts = opts || {};
     app.syncTempo();
     app.timeline.syncRows();
-    if (opts.mix) app.engine.updateMix(app.project);
-    else app.reschedule();
+    // Mix and effect-setting changes apply live; switching an effect on or off restarts playback in place.
+    if (!opts.mix || !app.engine.updateMix(app.project)) app.reschedule();
     app.timeline.invalidate();
     app.refreshUI();
     app.scheduleAutosave();
@@ -547,6 +552,7 @@
     const rec = {
       trackId: track.id, from, playStart, overdub, countIn,
       into: !!target,
+      liveTune: app.engine.live ? app.liveTuneOptions() : null, // she hears this take with Auto-Tune
       rate: app.engine.sampleRate,
       peaks: new SS.PeakBuilder(),
       input: app.engine.input,
@@ -626,9 +632,22 @@
     const level = app.checkTakeLevel(buffer, offset, !rec.into);
     const src = app.addSource(buffer, track.name);
     M.insertClip(track, { id: SS.uid('c'), src: src.id, name: track.name, offset, start, dur });
+    // She heard this take through live Auto-Tune: the track gets Auto-Tune too, so it plays back the same way.
+    // (The recording itself is kept untouched, so it can be changed or switched off later.)
+    let tuned = false;
+    if (rec.liveTune && !fxIsOn(track, 'autotune')) {
+      let f = fxOf(track, 'autotune');
+      if (!f) {
+        f = SS.newFx('autotune', { style: rec.liveTune.style });
+        track.fx = (track.fx || []).concat(f).sort((a, b) => SS.FX_ORDER.indexOf(a.type) - SS.FX_ORDER.indexOf(b.type));
+      }
+      f.on = true;
+      tuned = true;
+    }
     app.endGesture('Record');
     app.setSelection(start, start + dur, [track.id]);
     app.status('Recorded ' + SS.formatTime(dur, 1) + ' on “' + track.name + '”.' +
+      (tuned ? ' Auto-Tune is on for this track, so it plays back the way you heard it.' : '') +
       (level.boost ? ' It was quiet, so it was turned up ' + level.boost + ' dB.' : '') +
       (st.armed ? ' Space records another take. Press R to turn recording off and listen back.'
         : ' Press Space to hear it, or Backspace to delete it.'));
@@ -1088,6 +1107,365 @@
     app.engine.updateMix(app.project);
     const r = app.timeline.rows.get(id);
     if (r) app.timeline.updateHeader(r, t);
+  };
+
+  // ---- effects: Auto-Tune, Vocal Polish, Echo, Reverb ------------------------------------------
+  // Effects never change the recording: they're settings on the track, heard on playback and in exports,
+  // and can be switched off any time.
+
+  const LIVE_TUNE_SEEN_KEY = 'audabook.livetune.v1';
+  const fxOf = (track, type) => (track && track.fx ? track.fx.find((f) => f.type === type) : null) || null;
+  const fxIsOn = (track, type) => { const f = fxOf(track, type); return !!(f && f.on); };
+
+  /** Switches an effect on or off for a track (adding it with its usual settings the first time). */
+  app.setEffectOn = function (trackId, type, on) {
+    app.edit((on ? 'Turn on ' : 'Turn off ') + SS.FX[type].label, (p) => {
+      const t = M.findTrack(p, trackId);
+      if (!t) return;
+      if (!t.fx) t.fx = [];
+      let f = fxOf(t, type);
+      if (!f) {
+        if (!on) return;
+        f = SS.newFx(type, type === 'autotune' ? { style: app.settings.tuneStyle } : null);
+        t.fx.push(f);
+        t.fx.sort((a, b) => SS.FX_ORDER.indexOf(a.type) - SS.FX_ORDER.indexOf(b.type));
+      }
+      f.on = !!on;
+    }, { mix: true });
+  };
+
+  /** Effect slider moves: heard right away; one undo step when the slider is let go. */
+  app.setEffectLive = function (trackId, type, prop, value) {
+    const f = fxOf(M.findTrack(app.project, trackId), type);
+    if (!f || f[prop] === value) return;
+    app.beginGesture();
+    f[prop] = value;
+    if (type === 'autotune' && prop === 'style') app.settings.tuneStyle = value;
+    if (!app.engine.updateMix(app.project)) app.reschedule();
+    app.syncLiveTune();
+  };
+
+  app.endEffectChange = function (type) {
+    app.saveSettings();
+    app.endGesture('Change ' + SS.FX[type].label, { mix: true });
+  };
+
+  /** Echo timing and other choices from a list: one undoable step. */
+  app.setEffectValue = function (trackId, type, prop, value) {
+    app.edit('Change ' + SS.FX[type].label, (p) => {
+      const f = fxOf(M.findTrack(p, trackId), type);
+      if (f) f[prop] = value;
+    }, { mix: true });
+  };
+
+  app.setSongKey = function (key) {
+    if (SS.SONG_KEYS.indexOf(key) < 0) return;
+    app.edit('Change key', (p) => { p.key = key; }, { mix: true });
+    app.status(key === 'any'
+      ? 'Auto-Tune will use whichever note is closest.'
+      : 'Auto-Tune will keep your voice on the notes of ' + key + '.');
+  };
+
+  /**
+   * Works out the song's key by listening to the music: the tracks without Auto-Tune (usually the beat).
+   * Resolves to { key, r, margin } (see SS.keyFromChroma) or null if there's nothing to listen to.
+   */
+  app.findSongKey = async function () {
+    const audible = app.project.tracks.filter((t) => t.clips.length && M.isAudible(app.project, t));
+    let tracks = audible.filter((t) => !fxIsOn(t, 'autotune'));
+    if (!tracks.length) tracks = audible;
+    const chroma = new Float64Array(12);
+    let budget = 240; // seconds of audio at most, so it's quick even on a slow Chromebook
+    for (const t of tracks) {
+      for (const c of t.clips) {
+        const src = app.sources.get(c.src);
+        if (!src || !src.channels || budget <= 0) continue;
+        const secs = Math.min(c.dur, budget);
+        budget -= secs;
+        const from = Math.round(c.offset * src.rate);
+        SS.addChroma(src.channels, src.rate, from, Math.min(src.length, from + Math.round(secs * src.rate)), chroma);
+        await UI.nextFrame(); // keep the window responsive between pieces
+      }
+    }
+    if (!chroma.some((v) => v > 0)) return null;
+    return SS.keyFromChroma(chroma);
+  };
+
+  // ---- hearing yourself through Auto-Tune while recording ----
+
+  /** What the live Auto-Tune should do right now, or null when it should be silent. */
+  app.liveTuneOptions = function () {
+    const st = app.state;
+    if (!app.settings.liveTune || !st.armed || !app.engine.input) return null;
+    const target = st.recording ? M.findTrack(app.project, st.recording.trackId)
+      : st.armed === 'into' ? app.selectedTracks()[0] : null;
+    const f = fxOf(target, 'autotune');
+    return { style: f ? f.style : SS.finite(app.settings.tuneStyle, 0.5), key: app.project.key || 'any' };
+  };
+
+  app.syncLiveTune = function () {
+    const engine = app.engine;
+    const opts = app.liveTuneOptions();
+    if (!opts) {
+      if (engine.live) engine.stopLiveTune();
+      app.liveSig = '';
+      return;
+    }
+    const sig = opts.style + '|' + opts.key;
+    if (engine.live && engine.live.input === engine.input && sig === app.liveSig) return;
+    app.liveSig = engine.setLiveTune(opts) ? sig : '';
+  };
+
+  app.toggleLiveTune = async function () {
+    const s = app.settings;
+    if (s.liveTune) {
+      s.liveTune = false;
+      app.saveSettings();
+      app.refreshUI();
+      app.status('Live Auto-Tune is off. While recording you’ll hear just the music.');
+      return;
+    }
+    if (!storageFlag(LIVE_TUNE_SEEN_KEY)) {
+      const ok = await UI.dialog({
+        title: 'Put your headphones on first 🎧',
+        content: el('div', null, [
+          el('p', { text: 'Live Auto-Tune lets you hear your own voice with Auto-Tune while you sing, so you know how it will sound.' }),
+          el('p', { html: 'Wear <b>headphones</b> (plugged into the Chromebook or into your mic). Through the Chromebook’s speakers the sound ' +
+            'goes back into the mic and can make a loud squeal. If that happens, Audabook switches it off by itself.' }),
+          el('p', { text: 'Your recording is always saved without Auto-Tune, so you can change the Auto-Tune or turn it off later.' }),
+        ]),
+        buttons: [
+          { label: 'Cancel', value: false },
+          { label: 'My headphones are on', value: true, kind: 'primary' },
+        ],
+        dismissValue: false,
+      });
+      if (!ok) return;
+      storageFlag(LIVE_TUNE_SEEN_KEY, true);
+    }
+    s.liveTune = true;
+    app.saveSettings();
+    app.refreshUI();
+    if (!app.state.armed) app.status('Live Auto-Tune is on. Turn recording on (R) and sing: you’ll hear yourself with Auto-Tune.');
+    else if (!app.engine.live) app.status('Live Auto-Tune is on. It starts in a moment.');
+    else app.status('Live Auto-Tune is on: sing and you’ll hear it. Takes get Auto-Tune added, so they play back the way you heard them.');
+  };
+
+  app.onLiveFeedback = function () {
+    app.settings.liveTune = false;
+    app.saveSettings();
+    app.liveSig = '';
+    app.refreshUI();
+    UI.toast('Live Auto-Tune was switched off because it started to squeal (the speakers were feeding back into the mic). ' +
+      'Put headphones on, then turn it back on.', { kind: 'error', timeout: 14000 });
+  };
+
+  // ---- the Effects window ----
+
+  const ECHO_TIMING_LABELS = {
+    '1/8': 'Fast (every half beat)',
+    '1/4': 'Every beat',
+    'dotted 1/8': 'Bouncy (three-quarters of a beat)',
+    '1/2': 'Slow (every two beats)',
+  };
+
+  app.effectsDialog = function (trackId) {
+    const track = () => M.findTrack(app.project, trackId);
+    if (!track()) return undefined;
+    app.selectTrack(trackId, false);
+    const cards = [];
+
+    const slider = (type, prop, label, left, right) => {
+      const input = el('input', { class: 'range fx-range', type: 'range', min: '0', max: '1', step: '0.01', 'aria-label': SS.FX[type].label + ' ' + label });
+      input.addEventListener('input', () => app.setEffectLive(trackId, type, prop, +input.value));
+      input.addEventListener('change', () => app.endEffectChange(type));
+      return {
+        node: el('div', { class: 'fx-row' }, [
+          el('span', { class: 'fx-label', text: label }),
+          el('span', { class: 'fx-end', text: left }),
+          input,
+          el('span', { class: 'fx-end right', text: right }),
+        ]),
+        set(f) { if (+input.value !== f[prop]) input.value = f[prop]; },
+      };
+    };
+
+    const card = (type, controls, extra) => {
+      const def = SS.FX[type];
+      const sw = el('button', { class: 'switch', type: 'button', role: 'switch', 'aria-checked': 'false', 'aria-label': def.label }, [
+        el('span', { class: 'switch-track' }, [el('span', { class: 'switch-knob' })]),
+        el('span', { class: 'switch-text' }),
+      ]);
+      const body = el('div', { class: 'fx-controls' }, controls.map((c) => c.node).concat(extra || []));
+      const node = el('section', { class: 'fx-card', 'data-type': type }, [
+        el('div', { class: 'fx-head' }, [
+          el('span', { class: 'fx-icon', text: def.icon, 'aria-hidden': 'true' }),
+          el('div', { class: 'fx-titles' }, [el('h3', { text: def.label }), el('p', { class: 'fx-blurb', text: def.blurb })]),
+          sw,
+        ]),
+        body,
+      ]);
+      sw.addEventListener('click', () => {
+        app.setEffectOn(trackId, type, !fxIsOn(track(), type));
+        refresh();
+      });
+      // Clicking anywhere on a switched-off effect's title switches it on: the easiest target to hit.
+      node.querySelector('.fx-titles').addEventListener('click', () => {
+        if (!fxIsOn(track(), type)) {
+          app.setEffectOn(trackId, type, true);
+          refresh();
+        }
+      });
+      const c = {
+        type, node, body,
+        refresh() {
+          const t = track();
+          const f = fxOf(t, type);
+          const on = !!(f && f.on);
+          node.classList.toggle('on', on);
+          sw.setAttribute('aria-checked', String(on));
+          sw.querySelector('.switch-text').textContent = on ? 'On' : 'Off';
+          body.hidden = !on;
+          if (f) for (const ctl of controls) ctl.set(f);
+        },
+      };
+      cards.push(c);
+      return node;
+    };
+
+    // Auto-Tune: style, key, live.
+    const style = slider('autotune', 'style', 'Style', 'Natural', 'Robot');
+    const keySel = el('select', { class: 'select fx-key', 'aria-label': 'Key of your song' },
+      SS.SONG_KEYS.map((k) => el('option', { value: k, text: SS.keyLabel(k) })));
+    keySel.addEventListener('change', () => {
+      app.setSongKey(keySel.value);
+      refresh();
+    });
+    const findBtn = el('button', { class: 'btn small', type: 'button', text: 'Find it for me' });
+    const keyNote = el('p', { class: 'fx-note' });
+    findBtn.addEventListener('click', async () => {
+      findBtn.disabled = true;
+      findBtn.textContent = 'Listening…';
+      let found = null;
+      try {
+        found = await app.findSongKey();
+      } finally {
+        findBtn.disabled = false;
+        findBtn.textContent = 'Find it for me';
+      }
+      if (!found) {
+        keyNote.textContent = 'Import your beat first, then Audabook can listen to it and find the key.';
+        return;
+      }
+      app.setSongKey(found.key);
+      refresh();
+      const names = found.key + ' (same notes as ' + SS.relativeKey(found.key) + ')';
+      // Measured on test chord loops: real keys win by 0.25 or more, keyless noise by about 0.12.
+      keyNote.textContent = found.margin >= 0.18
+        ? 'Found it: your beat uses the notes of ' + names + '. If some notes come out wrong, choose “Any note (easiest)”.'
+        : 'It’s hard to tell with this beat. Best guess: ' + names + '. If notes come out wrong, choose “Any note (easiest)”.';
+    });
+    const keyRow = el('div', { class: 'fx-row' }, [el('span', { class: 'fx-label', text: 'Key' }), keySel, findBtn]);
+    const liveBox = el('input', { type: 'checkbox', 'aria-label': 'Hear Auto-Tune live while recording' });
+    liveBox.addEventListener('change', () => {
+      liveBox.checked = !!app.settings.liveTune; // the toggle (and its headphone check) decides
+      app.toggleLiveTune().then(refresh);
+    });
+    const liveRow = el('label', { class: 'check fx-live' }, [liveBox,
+      el('span', { html: '<b>Hear it live while recording</b> 🎧 (wear headphones). Your recording itself is always saved without Auto-Tune.' })]);
+    const atNode = card('autotune', [style, { node: keyRow, set: () => {} }], [keyNote, liveRow]);
+
+    const polish = card('polish', [slider('polish', 'amount', 'Amount', 'Light', 'Strong')]);
+    const timing = el('select', { class: 'select', 'aria-label': 'Echo timing' },
+      Object.keys(SS.ECHO_TIMINGS).map((k) => el('option', { value: k, text: ECHO_TIMING_LABELS[k] })));
+    timing.addEventListener('change', () => app.setEffectValue(trackId, 'echo', 'timing', timing.value));
+    const echo = card('echo', [
+      slider('echo', 'amount', 'Volume', 'Quiet', 'Loud'),
+      slider('echo', 'repeats', 'Repeats', 'Few', 'Many'),
+      { node: el('div', { class: 'fx-row' }, [el('span', { class: 'fx-label', text: 'Timing' }), timing]), set: (f) => { timing.value = f.timing; } },
+    ]);
+    const reverb = card('reverb', [
+      slider('reverb', 'amount', 'Amount', 'A little', 'A lot'),
+      slider('reverb', 'size', 'Room', 'Small room', 'Big hall'),
+    ]);
+
+    const listen = el('button', { class: 'btn fx-listen', type: 'button' });
+    listen.addEventListener('click', () => {
+      app.togglePlay();
+      refresh();
+    });
+    const off = el('button', { class: 'link-btn fx-all-off', type: 'button', text: 'Turn all effects off' });
+    off.addEventListener('click', () => {
+      app.edit('Turn effects off', (p) => {
+        const t = M.findTrack(p, trackId);
+        if (t && t.fx) for (const f of t.fx) f.on = false;
+      }, { mix: true });
+      refresh();
+    });
+
+    function refresh() {
+      const t = track();
+      if (!t) return;
+      for (const c of cards) c.refresh();
+      if (keySel.value !== (app.project.key || 'any')) keySel.value = app.project.key || 'any';
+      liveBox.checked = !!app.settings.liveTune;
+      const playing = app.state.playing && !app.state.recording;
+      listen.textContent = playing ? '⏸ Pause' : '▶ Play the song';
+      listen.hidden = !!app.state.armed;
+      off.hidden = !SS.hasActiveFx(t);
+    }
+
+    const content = el('div', { class: 'fx-dialog' }, [
+      el('p', { class: 'dlg-lead', text: 'Switch an effect on to try it. You hear changes right away, and they never change your recording: switch them off any time.' }),
+      atNode, polish, echo, reverb,
+      el('div', { class: 'fx-footer' }, [listen, el('span', { class: 'fx-tip', text: 'or press Space' }), off]),
+    ]);
+    let timer = 0;
+    return UI.dialog({
+      title: 'Effects for “' + track().name + '”',
+      wide: true,
+      content,
+      buttons: [{ label: 'Done', value: true, kind: 'primary' }],
+      dismissValue: true,
+      onOpen(ctrl) {
+        refresh();
+        timer = setInterval(refresh, 400); // playback can stop by itself at the end of the song
+        ctrl.el.addEventListener('keydown', (e) => {
+          if ((e.key === ' ' || e.key === 'Spacebar') && !app.state.armed &&
+            !/^(BUTTON|SELECT|TEXTAREA)$/.test(e.target.tagName) && !(e.target.tagName === 'INPUT' && e.target.type === 'text')) {
+            e.preventDefault();
+            app.togglePlay();
+            refresh();
+          }
+        });
+      },
+      onClose() {
+        clearInterval(timer);
+        if (app.gesture != null) app.endGesture('Change effects', { mix: true });
+      },
+    });
+  };
+
+  app.effectsForSelected = function () {
+    const t = app.selectedTracks()[0] || (app.project.tracks.length === 1 ? app.project.tracks[0] : null);
+    if (!t) {
+      UI.toast('First click a track’s name to choose which track gets the effects.');
+      return undefined;
+    }
+    return app.effectsDialog(t.id);
+  };
+
+  // ---- the track panel's width (drag its right edge) ----
+
+  app.applyHeaderWidth = function (w, save) {
+    const rootStyle = document.documentElement.style;
+    if (!w) rootStyle.removeProperty('--header-w');
+    else rootStyle.setProperty('--header-w', Math.round(SS.clamp(w, 200, Math.max(200, root.innerWidth * 0.5))) + 'px');
+    app.timeline.measure();
+    if (save) {
+      app.settings.headerW = w ? Math.round(w) : 0;
+      app.saveSettings();
+    }
   };
 
   // ---- sources & autosave -------------------------------------------------------------------
@@ -1974,6 +2352,8 @@
     const summary = el('p', { class: 'stem-summary' });
     const fmt = formatControls();
     const applyMix = checkBox('Use each track’s Vol and Pan settings', s.exportApplyMix);
+    const anyFx = tracks.some((t) => SS.hasActiveFx(t));
+    const applyFx = checkBox('Include effects (Auto-Tune, Echo, Reverb…) in the stems', s.exportApplyFx !== false);
     const includeMix = checkBox('Also export the full mix as one extra file', s.exportIncludeMix);
     const canFolder = SS.FolderTarget.supported();
     const toFolder = radio('saveTo', 'folder', 'WAV files in a new folder (you choose where)', s.exportTo !== 'zip');
@@ -1984,6 +2364,7 @@
       summary,
       el('div', { class: 'form-grid' }, [field('Format', fmt.bits), field('Sample rate', fmt.rate)]),
       applyMix.label,
+      anyFx ? applyFx.label : null,
       includeMix.label,
       canFolder ? el('fieldset', { class: 'radio-group' }, [el('legend', { text: 'Save as' }), toFolder.label, toZip.label]) : null,
     ]);
@@ -2020,6 +2401,7 @@
       bits: +fmt.bits.value,
       rate: +fmt.rate.value,
       applyMix: applyMix.input.checked,
+      applyFx: !anyFx || applyFx.input.checked,
       includeMix: includeMix.input.checked,
       toFolder: canFolder && !toZip.input.checked,
     };
@@ -2027,11 +2409,12 @@
       exportBits: opt.bits, exportRate: opt.rate, exportApplyMix: opt.applyMix,
       exportIncludeMix: opt.includeMix, exportTo: opt.toFolder ? 'folder' : 'zip',
     });
+    if (anyFx) app.settings.exportApplyFx = opt.applyFx;
     app.saveSettings();
     await app.exportStems(list, opt);
   };
 
-  /** opt: { bits, rate, applyMix, includeMix, toFolder } */
+  /** opt: { bits, rate, applyMix, applyFx, includeMix, toFolder } */
   app.exportStems = async function (tracks, opt) {
     // Stem packs usually carry the tempo in the name, which saves whoever gets them a question.
     const base = SS.safeFileName(app.project.name + (app.project.showBeats ? ' ' + app.project.bpm + ' BPM' : ''));
@@ -2062,7 +2445,10 @@
         const job = jobs[i];
         progress.set(i / jobs.length, job.text);
         await UI.nextFrame();
-        const buf = await SS.renderTracks(job.tracks, app.sources, { sampleRate: opt.rate, frames, applyMix: opt.applyMix });
+        const buf = await SS.renderTracks(job.tracks, app.sources, {
+          sampleRate: opt.rate, frames, applyMix: opt.applyMix, applyFx: opt.applyFx !== false,
+          songKey: app.project.key, bpm: app.project.bpm,
+        });
         if (opt.bits !== 32 && SS.audiblyClips(buf)) loud.push(job.label);
         await target.add(job.file, SS.encodeWav(SS.channelsOf(buf), opt.rate, opt.bits));
       }
@@ -2120,7 +2506,10 @@
     try {
       await UI.nextFrame();
       const end = tracks.reduce((m, t) => Math.max(m, M.trackEnd(t)), 0);
-      const buf = await SS.renderTracks(tracks, app.sources, { sampleRate: rate, frames: M.stemFrames(end, rate), applyMix: true });
+      const buf = await SS.renderTracks(tracks, app.sources, {
+        sampleRate: rate, frames: M.stemFrames(end, rate), applyMix: true, applyFx: true,
+        songKey: app.project.key, bpm: app.project.bpm,
+      });
       const clipped = bits !== 32 && SS.audiblyClips(buf);
       const where = await target.save(new Blob([SS.encodeWav(SS.channelsOf(buf), rate, bits)], { type: 'audio/wav' }));
       progress.close();
@@ -2259,6 +2648,9 @@
         '<li><b>Trim and cut.</b> Drag across a waveform to select part of it, then press <span class="kbd">Backspace</span> to delete it. ' +
         '<b>Split</b> (<span class="kbd">S</span>) cuts a clip in two at the cursor. Drag a clip’s colored top bar to move it, or drag its edge to trim it. ' +
         'To put tracks in a different order, drag a track’s <b>⠿</b> handle (left of its name) up or down.</li>' +
+        '<li><b>Effects and Auto-Tune.</b> Click a track’s <b>Effects</b> button and switch on Auto-Tune, Vocal Polish, Echo or Reverb. ' +
+        'They never change your recording, so you can switch them off any time. To hear Auto-Tune while you sing, click ' +
+        '<b>🎧 Live Auto-Tune</b> in the red bar when recording is on (wear headphones).</li>' +
         '<li><b>Export.</b> File → Export → <b>Export All Stems</b> (or the big <b>Export Stems</b> button) saves every track as its own WAV file, all exactly the same length.</li>' +
         '</ol>' +
         '<p class="dim">Your songs save themselves as you go. <b>My Songs</b> (top right) has every song you’ve made, and ' +
@@ -2277,6 +2669,7 @@
       ['Ctrl + Backspace', 'Delete and close the gap'],
       ['S', 'Split clips at the cursor'],
       ['K', 'Metronome on / off'],
+      ['E', 'Effects (Auto-Tune, Echo, Reverb…) for the selected track'],
       ['T', 'Tap tempo (tap along with the beat)'],
       ['Ctrl + Z / Ctrl + Y', 'Undo / redo'],
       ['Ctrl + X / C / V', 'Cut / copy / paste'],
@@ -2375,7 +2768,11 @@
         '<p>Version: <b>' + SS.BUILD + '</b></p>' +
         '<p class="dim">The layout and shortcuts follow Audacity, so tutorials for it mostly apply. This is an independent ' +
         'project, not made by or affiliated with the Audacity team. Some icons are adapted from Google’s Material Icons ' +
-        '(Apache License 2.0).</p>',
+        '(Apache License 2.0).</p>' +
+        '<p class="dim">Auto-Tune is a JavaScript port of the pitch-correction engine of x42-Autotune (fat1.lv2) by Robin Gareus, ' +
+        'which is based on zita-at1 and zita-resampler by Fons Adriaensen. Audabook is free software under the GNU General ' +
+        'Public License, version 3 or later; its source code is at ' +
+        '<a href="https://github.com/fkwhitton01/audabook" target="_blank" rel="noopener">github.com/fkwhitton01/audabook</a>.</p>',
       buttons: [{ label: 'Close', value: true, kind: 'primary' }],
     });
   };
@@ -2420,6 +2817,8 @@
     },
     recordMenu: { run: (btn) => app.openRecordMenu(btn), when: idle },
     toggleMonitor: { run: () => app.toggleMonitor(), when: idle },
+    effects: { run: () => app.effectsForSelected(), when: () => !app.state.recording && app.project.tracks.length > 0 },
+    toggleLiveTune: { run: () => app.toggleLiveTune(), when: () => !app.state.recording },
     goStart: { run: () => app.goStart(), when: idle },
     goEnd: { run: () => app.goEnd(), when: idle },
     addTrack: { run: () => app.addTrack(), when: idle },
@@ -2517,6 +2916,9 @@
         { label: () => (app.state.armed === 'new' ? 'Turn Recording Off' : 'Turn Recording On (New Track Each Take)'), action: 'record', shortcut: 'R' },
         { label: () => (app.state.armed === 'into' ? 'Turn Recording Off' : 'Turn Recording On (Into Selected Track)'), action: 'recordInto', shortcut: 'Shift+R' },
         { label: 'Check My Mic', action: 'toggleMonitor' },
+        { label: () => (app.settings.liveTune ? 'Live Auto-Tune While Recording: On' : 'Live Auto-Tune While Recording: Off'), action: 'toggleLiveTune' },
+        { sep: true },
+        { label: 'Effects (Auto-Tune, Echo, Reverb)…', action: 'effects', shortcut: 'E' },
         { sep: true },
         { label: 'New Empty Track', action: 'addTrack' },
         { label: 'Delete Selected Track', action: 'deleteTracks' },
@@ -2564,6 +2966,7 @@
       { label: () => (app.state.armed === 'into' ? 'Turn recording off' : 'Turn recording on (into the selected track)'), action: 'recordInto', shortcut: 'Shift+R' },
       { sep: true },
       { label: 'Check my mic', action: 'toggleMonitor' },
+      { label: () => (app.settings.liveTune ? 'Live Auto-Tune while recording: on' : 'Live Auto-Tune while recording: off'), action: 'toggleLiveTune' },
       { label: () => (app.settings.metronome ? 'Metronome and count-in: on' : 'Metronome and count-in: off'), action: 'toggleMetronome', shortcut: 'K' },
       { label: 'Microphone settings…', action: 'settings' },
       { label: 'Microphone help', action: 'micHelp' },
@@ -2601,12 +3004,23 @@
     const target = st.armed === 'into' && app.selectedTracks()[0];
     banner.hidden = !st.armed && !st.recording;
     banner.classList.toggle('live', !!st.recording);
-    banner.textContent = st.recording
+    const bannerText = st.recording
       ? 'Recording… press Space to stop.'
       : st.armed
         ? 'Recording is on' + (target ? ' (into “' + target.name + '”)' : '') +
           ': press Space to start a take, and Space again to stop. Press R to turn recording off.'
         : '';
+    const abText = banner.querySelector('.ab-text');
+    if (abText.textContent !== bannerText) abText.textContent = bannerText;
+    const live = banner.querySelector('.ab-live');
+    const liveOn = !!app.settings.liveTune;
+    live.textContent = liveOn ? '🎧 Live Auto-Tune: On' : '🎧 Live Auto-Tune: Off';
+    live.classList.toggle('on', liveOn);
+    live.setAttribute('aria-pressed', String(liveOn));
+    live.title = liveOn
+      ? 'You hear yourself with Auto-Tune while recording is on. Click to turn it off.'
+      : 'Hear yourself with Auto-Tune while you sing (wear headphones). Click to turn it on.';
+    app.syncLiveTune();
     const nameBtn = document.getElementById('project-name');
     if (nameBtn.textContent !== app.project.name) nameBtn.textContent = app.project.name;
     document.title = app.project.name + ' – Audabook';
@@ -2691,6 +3105,8 @@
       case 'S': return run('split');
       case 'k':
       case 'K': return run('toggleMetronome');
+      case 'e':
+      case 'E': return run('effects');
       case 't':
       case 'T': return run('tapTempo');
       case 'Home': return run('goStart');
@@ -2780,8 +3196,15 @@
 
   app.init = async function () {
     app.engine.onInputLost = app.onInputLost;
+    app.engine.onFeedback = app.onLiveFeedback;
+    app.engine.onFxReady = () => {
+      // Auto-Tune's code finished loading: bring it into a song that started playing without it.
+      if (SS.needsWorklet(app.project.tracks)) app.reschedule();
+      app.syncLiveTune();
+    };
     app.applyTheme();
     app.timeline = new SS.Timeline(app);
+    if (app.settings.headerW) app.applyHeaderWidth(app.settings.headerW);
     app.timeline.pps = app.timeline.laneWidth / 40;
     app.menubar = new UI.MenuBar(document.getElementById('menus'), MENUS, app);
     app.popup = new UI.Menu(app);

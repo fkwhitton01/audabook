@@ -1033,6 +1033,20 @@
     });
   };
 
+  /** Drag and drop: puts a track at `index` in the list (counting the other tracks, 0 = top). */
+  app.moveTrackTo = function (id, index) {
+    let moved = null;
+    app.edit('Move track', (p) => {
+      const i = p.tracks.findIndex((x) => x.id === id);
+      const j = SS.clamp(index, 0, p.tracks.length - 1);
+      if (i < 0 || i === j) return;
+      const t = p.tracks.splice(i, 1)[0];
+      p.tracks.splice(j, 0, t);
+      moved = t;
+    }, { mix: true }); // the order doesn't change the sound, so playback carries on untouched
+    if (moved) app.status('Moved “' + moved.name + '”. Ctrl+Z puts it back.');
+  };
+
   app.renameTrack = function (id, name) {
     const n = String(name || '').trim().slice(0, 60);
     if (!n) {
@@ -2243,7 +2257,8 @@
         '<span class="kbd">Space</span> to start and <span class="kbd">Space</span> again to stop. Every take goes on its own track. ' +
         'Press <span class="kbd">R</span> again to turn recording off, and Space plays your song.</li>' +
         '<li><b>Trim and cut.</b> Drag across a waveform to select part of it, then press <span class="kbd">Backspace</span> to delete it. ' +
-        '<b>Split</b> (<span class="kbd">S</span>) cuts a clip in two at the cursor. Drag a clip’s colored top bar to move it, or drag its edge to trim it.</li>' +
+        '<b>Split</b> (<span class="kbd">S</span>) cuts a clip in two at the cursor. Drag a clip’s colored top bar to move it, or drag its edge to trim it. ' +
+        'To put tracks in a different order, drag a track’s <b>⠿</b> handle (left of its name) up or down.</li>' +
         '<li><b>Export.</b> File → Export → <b>Export All Stems</b> (or the big <b>Export Stems</b> button) saves every track as its own WAV file, all exactly the same length.</li>' +
         '</ol>' +
         '<p class="dim">Your songs save themselves as you go. <b>My Songs</b> (top right) has every song you’ve made, and ' +

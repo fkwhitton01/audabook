@@ -21,6 +21,7 @@ Built for her Chromebook (Intel N150, 4 GB RAM). It also works on any Chromebook
   - **Level help:** quiet takes are turned up automatically. A silent or distorted take gets a plain-English tip, such as "check the mute button" or "turn the gain knob down".
 - **Tempo:** a BPM box, a **Tap** button (tap along to find the tempo), time signature, a metronome with a one-bar count-in, a bars-and-beats ruler, and clips that snap to the beat. The click is never included in exports.
 - **Edit:** drag across a waveform to select, **Backspace** to delete, **S** to split, drag a clip's colored top bar to move it, drag its edge to trim. Cut, copy, paste, and up to 100 levels of undo. Cut points get a tiny automatic fade so they never click.
+- **Organize tracks:** drag a track's **⠿** handle (left of its name), or any empty spot of its panel, up or down to put it somewhere else. A blue line shows where it will land, and the list scrolls if she drags past the top or bottom. Ctrl+Z undoes a move; Tracks → Move Track Up/Down does the same from the menu.
 - **Export:** **File → Export → Export All Stems** (or the big **Export Stems** button).
   - Every ticked track becomes its own WAV file; tracks that are muted start unticked.
   - All stems start at 0:00 and have exactly the same number of samples, so they line up in any music app.

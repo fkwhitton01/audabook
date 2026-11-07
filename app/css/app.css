@@ -551,7 +551,33 @@ button { font: inherit; color: inherit; }
 .track.selected .track-head { background: var(--head-selected); }
 
 .th-top { display: flex; align-items: center; gap: 4px; }
-.th-swatch { display: none; }
+.th-grip {
+  display: inline-flex;
+  flex: none;
+  margin-left: -5px;
+  color: var(--text-dim);
+  cursor: grab;
+  touch-action: none; /* on a touchscreen, dragging the grip moves the track instead of scrolling */
+}
+.th-grip:hover { color: var(--text); }
+.track.reordering {
+  position: relative;
+  z-index: 20;
+  opacity: 0.92;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+.is-reordering, .is-reordering * { cursor: grabbing !important; }
+.drop-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
 .th-name {
   flex: 1;
   min-width: 0;

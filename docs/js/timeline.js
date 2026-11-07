@@ -191,8 +191,9 @@
       const gainOut = el('output', { class: 'th-val' });
       const pan = el('input', { class: 'th-pan', type: 'range', min: '-1', max: '1', step: '0.02', 'aria-label': 'Pan', title: 'Pan left/right (double-click to center)' });
       const panOut = el('output', { class: 'th-val' });
+      const grip = el('span', { class: 'th-grip', title: 'Drag to move this track up or down' }, [UI.icon('grip', 16)]);
       const head = el('div', { class: 'track-head' }, [
-        el('div', { class: 'th-top' }, [el('span', { class: 'th-swatch' }), name, del]),
+        el('div', { class: 'th-top' }, [grip, name, del]),
         el('div', { class: 'th-buttons' }, [mute, solo]),
         el('label', { class: 'th-slider' }, [el('span', { class: 'th-lbl', text: 'Vol' }), gain, gainOut]),
         el('label', { class: 'th-slider' }, [el('span', { class: 'th-lbl', text: 'Pan' }), pan, panOut]),
@@ -206,7 +207,13 @@
       head.addEventListener('pointerdown', (e) => {
         if (e.target.closest('button, input[type=range]')) return;
         app.selectTrack(id, e.shiftKey || e.ctrlKey || e.metaKey);
+        // Dragging the grip, or any empty spot of the panel (not the name box), moves the track.
+        if (e.target.closest('input') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+        this.reorderStart(e, r);
       });
+      head.addEventListener('pointermove', (e) => this.reorderMove(e));
+      head.addEventListener('pointerup', (e) => this.reorderEnd(e, false));
+      head.addEventListener('pointercancel', (e) => this.reorderEnd(e, true));
       name.addEventListener('change', () => app.renameTrack(id, name.value));
       name.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') name.blur();
@@ -239,6 +246,86 @@
       lane.addEventListener('dblclick', (e) => this.laneDoubleClick(e, r));
       lane.addEventListener('contextmenu', (e) => e.preventDefault());
       return r;
+    }
+
+    // ---- moving tracks up and down (drag the panel on the left) ---------------------------
+
+    reorderStart(e, r) {
+      if (this.app.state.recording || this.app.project.tracks.length < 2) return;
+      e.preventDefault(); // no text selection while dragging
+      try {
+        r.head.setPointerCapture(e.pointerId); // keep getting moves even when the pointer leaves the panel
+      } catch (err) { /* pointer already gone */ }
+      this.reorder = { r, pointerId: e.pointerId, startY: e.clientY, lastY: e.clientY, startScroll: this.scroller.scrollTop, moved: false };
+    }
+
+    reorderMove(e) {
+      const d = this.reorder;
+      if (!d || e.pointerId !== d.pointerId) return;
+      d.lastY = e.clientY;
+      if (!d.moved) {
+        if (Math.abs(e.clientY - d.startY) < 5) return; // a click, not a drag
+        d.moved = true;
+        // Measure every row once, before anything moves (offsetTop ignores the drag's transform).
+        d.rows = this.app.project.tracks.map((t) => this.rows.get(t.id)).filter(Boolean);
+        d.from = d.rows.indexOf(d.r);
+        d.mids = d.rows.map((x) => x.row.offsetTop + x.row.offsetHeight / 2);
+        // Limits, measured before anything moves: the lifted track stays within the list, and the list
+        // doesn't scroll past its real end (otherwise the moving track keeps making room for itself).
+        const lastRow = d.rows[d.rows.length - 1].row;
+        d.minDy = d.rows[0].row.offsetTop - d.r.row.offsetTop;
+        d.maxDy = lastRow.offsetTop + lastRow.offsetHeight - (d.r.row.offsetTop + d.r.row.offsetHeight);
+        d.maxScroll = Math.max(0, this.scroller.scrollHeight - this.scroller.clientHeight);
+        d.r.row.classList.add('reordering');
+        document.body.classList.add('is-reordering');
+        if (!this.dropLine) {
+          this.dropLine = el('div', { class: 'drop-line', hidden: true });
+          this.scroller.appendChild(this.dropLine);
+        }
+        // Near the top or bottom edge: keep scrolling the list (even while the pointer is held still)
+        // so she can drag a track all the way. A timer, not animation frames, so it never stalls.
+        d.timer = setInterval(() => {
+          if (this.reorder !== d) return clearInterval(d.timer);
+          const b = this.scroller.getBoundingClientRect();
+          const v = d.lastY < b.top + 36 ? d.lastY - (b.top + 36) : d.lastY > b.bottom - 36 ? d.lastY - (b.bottom - 36) : 0;
+          if (v) {
+            this.scroller.scrollTop = SS.clamp(this.scroller.scrollTop + SS.clamp(v, -40, 40) * 0.4, 0, d.maxScroll);
+            this.reorderUpdate();
+          }
+        }, 16);
+      }
+      this.reorderUpdate();
+    }
+
+    reorderUpdate() {
+      const d = this.reorder;
+      const dy = SS.clamp(d.lastY - d.startY + (this.scroller.scrollTop - d.startScroll), d.minDy, d.maxDy);
+      d.r.row.style.transform = 'translateY(' + dy + 'px)';
+      // The new place: how many of the other tracks sit above the dragged track's middle. At the very
+      // top or bottom the middles line up exactly, so a tie counts as passed for tracks below it.
+      const mid = d.mids[d.from] + dy;
+      let target = 0;
+      for (let i = 0; i < d.rows.length; i++) {
+        if (i < d.from ? d.mids[i] < mid : i > d.from && d.mids[i] <= mid) target++;
+      }
+      d.target = target;
+      const others = d.rows.filter((x) => x !== d.r);
+      const y = target === 0 ? others[0].row.offsetTop : others[target - 1].row.offsetTop + others[target - 1].row.offsetHeight;
+      this.dropLine.style.transform = 'translateY(' + (y - 2) + 'px)';
+      this.dropLine.hidden = target === d.from; // dropping it where it already is: no line
+    }
+
+    reorderEnd(e, cancelled) {
+      const d = this.reorder;
+      if (!d || e.pointerId !== d.pointerId) return;
+      this.reorder = null;
+      if (!d.moved) return;
+      clearInterval(d.timer);
+      d.r.row.classList.remove('reordering');
+      d.r.row.style.transform = '';
+      document.body.classList.remove('is-reordering');
+      this.dropLine.hidden = true;
+      if (!cancelled && d.target !== d.from) this.app.moveTrackTo(d.r.id, d.target);
     }
 
     syncRows() {

@@ -51,7 +51,13 @@ Audabook is live at **https://fkwhitton01.github.io/audabook/**, served free by 
 
 Now it opens in its own window like a normal app and works with no internet. Bonus: she can right-click an MP3 or WAV in the Files app and choose **Open with → Audabook**.
 
-**Updating it later:** after changing anything in `app/`, run `npm run build` (it refreshes `docs/`), then commit and push. GitHub republishes within a minute or two, and her app picks up the new version the next time she opens it with internet.
+**Updating it later:** after changing anything in `app/`, run `npm run build` (it refreshes `docs/` and stamps a new release id), then commit and push. GitHub republishes within a minute or two.
+
+How it reaches her:
+- The next time she opens Audabook, or comes back to it while it's open (it also checks every half hour), it downloads the whole new version in the background.
+- A blue bar then says **"A new version of Audabook is ready"** with **Restart to update**. Clicking it saves her work and switches over; **Later** leaves the update for her next open.
+- **Help → About** shows the running version (date and release id), and **Help → Check for Updates** checks right away.
+- The app always runs one complete version: a new one is only used once every file of it has downloaded, so old and new files never mix.
 
 ### Backup option: one file, no website
 

@@ -5,6 +5,7 @@
   const SS = (root.SS = root.SS || {});
 
   SS.VERSION = '1.0.0';
+  SS.BUILD = 'dev'; // the build stamps the release date and id here (shown in Help → About)
   SS.APP_NAME = 'Audabook';
 
   let counter = 0;

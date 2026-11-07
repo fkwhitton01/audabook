@@ -11,6 +11,22 @@ const here = dirname(fileURLToPath(import.meta.url));
 const appDir = join(here, '..', 'app');
 const dist = join(here, '..', 'dist');
 const read = (p) => readFileSync(join(appDir, p), 'utf8');
+const scripts = [...read('index.html').matchAll(/<script src="([^"]+)"/g)].map((m) => m[1]);
+
+// The release id: changes whenever any part of the app changes, so the offline copy knows to update.
+const hash = createHash('sha256');
+for (const f of ['index.html', 'css/app.css', 'sw.js', 'manifest.webmanifest', ...scripts]) hash.update(read(f));
+const version = hash.digest('hex').slice(0, 10);
+const date = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+const label = date + ' (' + version.slice(0, 7) + ')';
+
+// Help → About shows which release is running.
+const stampBuild = (code) => {
+  const out = code.replace("SS.BUILD = 'dev';", "SS.BUILD = '" + label + "';");
+  if (out === code) throw new Error('could not stamp the release into util.js');
+  return out;
+};
+const readStamped = (p) => (p === 'js/util.js' ? stampBuild(read(p)) : read(p));
 
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
@@ -19,7 +35,7 @@ mkdirSync(dist, { recursive: true });
 let html = read('index.html');
 html = html.replace(/<link rel="stylesheet" href="([^"]+)">/g, (_, href) => `<style>\n${read(href)}\n</style>`);
 html = html.replace(/<script src="([^"]+)"><\/script>/g, (_, src) => {
-  const code = read(src).replace(/<\/script/gi, '<\\/script');
+  const code = readStamped(src).replace(/<\/script/gi, '<\\/script');
   return `<script>\n${code}\n</script>`;
 });
 const svgIcon = 'data:image/svg+xml;base64,' + Buffer.from(read('icons/icon.svg')).toString('base64');
@@ -33,12 +49,10 @@ writeFileSync(join(dist, 'Audabook.html'), html);
 // --- installable web app -----------------------------------------------------------------------
 const web = join(dist, 'web');
 cpSync(appDir, web, { recursive: true });
-const hash = createHash('sha256');
-for (const f of ['index.html', 'css/app.css', ...[...read('index.html').matchAll(/<script src="([^"]+)"/g)].map((m) => m[1])]) hash.update(read(f));
-const version = hash.digest('hex').slice(0, 10);
 const sw = read('sw.js').replace("'audabook-CACHE_VERSION'", `'audabook-${version}'`);
 if (!sw.includes(`'audabook-${version}'`)) throw new Error('could not stamp the cache version into sw.js');
 writeFileSync(join(web, 'sw.js'), sw);
+writeFileSync(join(web, 'js', 'util.js'), readStamped('js/util.js'));
 writeFileSync(join(web, '.nojekyll'), ''); // GitHub Pages: serve files as-is
 
 const docs = join(here, '..', 'docs');
@@ -46,4 +60,4 @@ rmSync(docs, { recursive: true, force: true });
 cpSync(web, docs, { recursive: true });
 
 console.log(`dist/Audabook.html  (${(html.length / 1024).toFixed(0)} KB)`);
-console.log(`dist/web/ and docs/ (cache version ${version})`);
+console.log(`dist/web/ and docs/ (release ${label})`);

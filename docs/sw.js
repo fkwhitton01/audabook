@@ -1,6 +1,7 @@
 /* Audabook — service worker: keeps the app working with no internet once it has been opened.
-   The build replaces CACHE_VERSION so a new release replaces the old files. */
-const CACHE = 'audabook-732f214738';
+   Each release is cached as one complete set (the build stamps CACHE_VERSION), so the app always runs a
+   single, whole version; a new release downloads in full in the background and takes over in one step. */
+const CACHE = 'audabook-15b7482b56';
 const FILES = [
   './',
   'index.html',
@@ -26,7 +27,13 @@ const FILES = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's copies (GitHub lets those be reused for 10 minutes),
+  // so a new release can never be saved with old files mixed in.
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -37,25 +44,20 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// Serve from the cache straight away (fast and offline), and refresh the cache in the background.
+// Serve the app from this release's set (fast, and works offline). Files are never refreshed one by one:
+// updates arrive only as a whole new release, so old and new files can't get mixed.
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  e.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const cached = await cache.match(req, { ignoreSearch: true }) ||
-        (req.mode === 'navigate' ? await cache.match('index.html') : undefined);
-      const fresh = fetch(req)
-        .then((res) => {
-          if (res && res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => null);
-      if (cached) {
-        e.waitUntil(fresh);
-        return cached;
-      }
-      return (await fresh) || new Response('You are offline.', { status: 503, headers: { 'Content-Type': 'text/plain' } });
-    })
-  );
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(req, { ignoreSearch: true }) ||
+      (req.mode === 'navigate' ? await cache.match('index.html') : undefined);
+    if (hit) return hit;
+    try {
+      return await fetch(req);
+    } catch (err) {
+      return new Response('You are offline.', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+    }
+  })());
 });

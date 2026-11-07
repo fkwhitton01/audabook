@@ -2300,12 +2300,79 @@
     });
   };
 
+  // ---- updates ------------------------------------------------------------------------------
+
+  /** Watches for new releases: on opening, whenever she comes back to the app, and every half hour. */
+  app.watchForUpdates = function (reg) {
+    app.swReg = reg;
+    let hadController = !!root.navigator.serviceWorker.controller;
+    root.navigator.serviceWorker.addEventListener('controllerchange', () => {
+      // The very first install isn't an update; after that, a new controller means a new release took over.
+      if (!hadController) {
+        hadController = true;
+        return;
+      }
+      app.updateReady();
+    });
+    const check = () => reg.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') check();
+    });
+    setInterval(check, 30 * 60 * 1000);
+    return reg;
+  };
+
+  app.updateReady = function () {
+    app.updateIsReady = true;
+    const banner = document.getElementById('update-banner');
+    if (banner) banner.hidden = false;
+    app.status('A new version of Audabook is ready. Click “Restart to update” at the top (your work is saved first).');
+  };
+
+  /** Restarts into the new version, after saving everything. */
+  app.restartForUpdate = async function () {
+    if (app.state.recording) {
+      UI.toast('Finish recording first (press Space), then click Restart.');
+      return;
+    }
+    if (app.state.playing) app.pause();
+    await app.flushSave();
+    if (app.folderTimer) app.folderSaveNow();
+    try {
+      await app.folder.queue;
+    } catch (e) { /* the folder copy catches up next time */ }
+    root.location.reload();
+  };
+
+  app.checkForUpdates = async function () {
+    const reg = app.swReg;
+    if (app.updateIsReady) return app.updateReady();
+    if (!reg) {
+      UI.toast('Updates arrive by themselves when Audabook is opened from its web address.');
+      return;
+    }
+    app.status('Checking for updates…');
+    try {
+      await reg.update();
+    } catch (e) {
+      UI.toast('Couldn’t check for updates. Is the Chromebook online?', { kind: 'error' });
+      return;
+    }
+    if (reg.installing || reg.waiting) {
+      app.status('Downloading the new version… a bar will appear at the top when it’s ready.');
+    } else {
+      app.status('You have the latest version.');
+      UI.toast('You have the latest version (' + SS.BUILD + ').', { kind: 'success' });
+    }
+  };
+
   app.aboutDialog = function () {
     return UI.dialog({
       title: 'About Audabook',
       content:
-        '<p><b>Audabook ' + SS.VERSION + '</b>: a simple multitrack recorder for Chromebooks. Record, trim, and export stems ' +
+        '<p><b>Audabook</b>: a simple multitrack recorder for Chromebooks. Record, trim, and export stems ' +
         'without installing Linux.</p>' +
+        '<p>Version: <b>' + SS.BUILD + '</b></p>' +
         '<p class="dim">The layout and shortcuts follow Audacity, so tutorials for it mostly apply. This is an independent ' +
         'project, not made by or affiliated with the Audacity team. Some icons are adapted from Google’s Material Icons ' +
         '(Apache License 2.0).</p>',
@@ -2371,6 +2438,14 @@
     quickStart: { run: () => app.quickStart() },
     shortcuts: { run: () => app.shortcutsDialog() },
     about: { run: () => app.aboutDialog() },
+    checkUpdates: { run: () => app.checkForUpdates() },
+    restartForUpdate: { run: () => app.restartForUpdate() },
+    laterUpdate: {
+      run: () => {
+        document.getElementById('update-banner').hidden = true;
+        app.status('The update will be used the next time you open Audabook.');
+      },
+    },
   };
 
   app.canRun = function (name) {
@@ -2472,6 +2547,7 @@
         { label: 'Quick Start', action: 'quickStart' },
         { label: 'Microphone Help', action: 'micHelp' },
         { label: 'Keyboard Shortcuts', action: 'shortcuts' },
+        { label: 'Check for Updates', action: 'checkUpdates' },
         { label: 'About Audabook', action: 'about' },
       ],
     },
@@ -2776,7 +2852,9 @@
       });
     }
     if ('serviceWorker' in root.navigator && root.location.protocol === 'https:') {
-      root.navigator.serviceWorker.register('sw.js').catch((e) => console.warn('Offline mode unavailable:', e));
+      root.navigator.serviceWorker.register('sw.js')
+        .then(app.watchForUpdates)
+        .catch((e) => console.warn('Offline mode unavailable:', e));
     }
     if (!storageFlag(SEEN_KEY)) app.quickStart();
     else app.maybeSuggestFolder();
